@@ -23,7 +23,7 @@ class HistoryIndex:
     def owners(op):
         if op['kind'] in ('compound', 'transfer'):
             return frozenset(op.get('states', ()))
-        if op['kind'] in ('draw', 'erase', 'move', 'delete', 'transform'):
+        if op['kind'] in ('draw', 'erase', 'move', 'delete', 'scale', 'transform'):
             return frozenset({op.get('page'), op.get('target')} - {None})
         # Page order, external image changes and unknown commands are global.
         return None

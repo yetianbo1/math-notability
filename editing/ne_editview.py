@@ -85,6 +85,11 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
             shape = Qt.CursorShape.BlankCursor
         elif self._reading_pan is not None:
             shape = Qt.CursorShape.ClosedHandCursor
+        elif (self.edit_tool == 'select' and self.hover_point is not None
+              and self.hitSelectionResizeHandle(self.hover_point)):
+            corner = self.hitSelectionResizeHandle(self.hover_point)[1]
+            shape = (Qt.CursorShape.SizeFDiagCursor if corner in ('nw', 'se')
+                     else Qt.CursorShape.SizeBDiagCursor)
         elif self.edit_tool == 'read' or (self.hover_point is not None and self.pointOnPage(self.hover_point) is None):
             shape = Qt.CursorShape.OpenHandCursor
         elif self.edit_tool in ('erase', 'select', 'image'):

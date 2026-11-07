@@ -442,7 +442,7 @@ class EditorPanel(QFrame):
         owner.erase_mode.currentIndexChanged.connect(
             lambda index:owner.remember_tool_setting('erase/mode','stroke' if index==1 else 'partial'))
         row=self.pages['select'][1];self.selection_label=QLabel('框选碰到即选整笔');row.addWidget(self.selection_label);row.addStretch()
-        self.selection_hint=QLabel('选框内拖动 · Shift 追加 · Esc 取消');row.addWidget(self.selection_hint)
+        self.selection_hint=QLabel('框内拖动 · 拖四角缩放 · Shift 追加 · Alt 减去 · Esc 取消');row.addWidget(self.selection_hint)
         self.delete_action=owner.action(self,'删除',lambda:owner.canvas.deleteSelection() if hasattr(owner.canvas,'deleteSelection') else None)
         self.delete_action.setIcon(tool_icon('delete'));self.delete_action.setToolTip('删除选中笔迹（Delete）')
         button=QToolButton();button.setDefaultAction(self.delete_action);button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon);button.setIconSize(QSize(20,20));row.addWidget(button)

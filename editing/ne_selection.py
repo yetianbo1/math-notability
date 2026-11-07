@@ -5,6 +5,8 @@ from dataclasses import replace
 from PyQt6.QtCore import QPointF,QRectF,Qt,QTimer
 from PyQt6.QtGui import QColor,QPen,QPainterPath,QPolygonF,QTransform
 from editing.ne_smart_selection import InkSelectionIndex
+from editing.ne_ink_scale import (CORNERS,HANDLE_TOLERANCE_PX,opposite_corner,
+                                  rect_corners,scale_strokes,scaled_bounds)
 
 def stroke_touches_rect(stroke,rect,smooth=True):
     """Select entire strokes by their displayed outline, including filled ink."""
@@ -97,8 +99,48 @@ class SelectionMixin:
     def selectionTolerance(self,page):
         return 6*self.editPageSize(page)[0]/self.draw_sizes[page][0]
 
+    def selectionScreenBox(self):
+        """Selection frame in widget coordinates, matching paintSelectionOverlay."""
+        bounds=self.selectionBounds()
+        if bounds is None or self.selection_page is None:return None,None
+        page=self.selection_page
+        w,h=self.draw_sizes[page];nw,nh=self.editPageSize(page)
+        left=(self.width()-w)/2
+        top=self.tops[page] if hasattr(self,'tops') else self.pageTop(page)
+        rect=bounds.adjusted(-3,-3,3,3)
+        box=QRectF(left+rect.x()*w/nw,top+rect.y()*h/nh,
+                   rect.width()*w/nw,rect.height()*h/nh)
+        return page,box
+
+    def hitSelectionResizeHandle(self,position):
+        """Return (page, corner, page-space bounds) when a corner is under the pointer."""
+        if self.edit_tool!='select' or not self.show_ink or position is None:return None
+        page,box=self.selectionScreenBox()
+        if box is None:return None
+        # A flat selection (one handwritten line) puts all four corners within
+        # a few pixels of each other; always use the geometrically nearest one
+        # instead of the first match, or the wrong anchor gets picked.
+        best=None;best_dist=float('inf')
+        for corner,point in rect_corners(box.left(),box.top(),
+                                         box.width(),box.height()).items():
+            dist=math.hypot(position.x()-point[0],position.y()-point[1])
+            if dist<best_dist:
+                best_dist=dist;best=(page,corner,self.selectionBounds())
+        return best if best_dist<=HANDLE_TOLERANCE_PX else None
+
     def beginSelection(self,position,modifiers=Qt.KeyboardModifier.NoModifier):
         if self.edit_tool=='image':return False
+        additive=bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        subtract=bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        handle=None if (additive or subtract) else self.hitSelectionResizeHandle(position)
+        if handle is not None:
+            page,corner,bounds=handle
+            anchor=rect_corners(bounds.x(),bounds.y(),
+                                bounds.width(),bounds.height())[opposite_corner(corner)]
+            self.selection_drag=dict(kind='scale',page=page,target=page,corner=corner,
+                bounds=bounds,anchor=anchor,factor=1.0,
+                preview=(bounds.x(),bounds.y(),bounds.width(),bounds.height()))
+            self.setFocus();self.update();return True
         hit=self.pointOnPage(position)
         if hit is None:self.clearSelection();return False
         page,point=hit;bounds=self.selectionBounds();tol=self.selectionTolerance(page)
@@ -107,8 +149,6 @@ class SelectionMixin:
         # starts a new selection and drops strokes when a word is dragged.
         on_selected=(page==self.selection_page and bounds is not None and
                      bounds.adjusted(-3,-3,3,3).adjusted(-tol,-tol,tol,tol).contains(QPointF(*point)))
-        additive=bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-        subtract=bool(modifiers & Qt.KeyboardModifier.AltModifier)
         base=set(self.selected_indices) if (additive or subtract) and page==self.selection_page else set()
         base_region=QPainterPath(self.selection_region) if base and self.selection_region is not None else None
         if on_selected and not (additive or subtract):
@@ -123,6 +163,17 @@ class SelectionMixin:
         drag=self.selection_drag
         if not drag:return
         page=drag['page']
+        if drag['kind']=='scale':
+            hit=self.pointOnPage(position,page)
+            if hit is None:return
+            _,point=hit;bounds=drag['bounds']
+            try:
+                nx,ny,nw,nh,ax,ay,factor=scaled_bounds(
+                    (bounds.x(),bounds.y(),bounds.width(),bounds.height()),
+                    drag['corner'],point,self.editPageSize(page))
+            except ValueError:return
+            drag.update(preview=(nx,ny,nw,nh),anchor=(ax,ay),factor=factor)
+            self.update();return
         if drag['kind']=='move':
             hit=self.pointOnPage(position)
             if hit is None:return
@@ -231,6 +282,16 @@ class SelectionMixin:
             elif self.edits.change_selection(page,self.selected_indices,drag['dx'],drag['dy']):
                 if self.selection_region is not None:self.selection_region.translate(drag['dx'],drag['dy'])
                 self.editsChanged.emit()
+        elif drag['kind']=='scale':
+            factor=drag.get('factor',1.0);anchor=drag.get('anchor')
+            if anchor is not None and self.edits.scale_selection(
+                    page,self.selected_indices,anchor,factor):
+                if self.selection_region is not None:
+                    ax,ay=anchor
+                    transform=QTransform()
+                    transform.translate(ax,ay);transform.scale(factor,factor);transform.translate(-ax,-ay)
+                    self.selection_region=transform.map(self.selection_region)
+                self.editsChanged.emit()
         else:
             self.selected_indices=self._querySelection(drag,final=True)
             region,clicked=self._selectionRegion(drag)
@@ -258,7 +319,13 @@ class SelectionMixin:
 
     def selectedPreview(self,page,strokes):
         drag=self.selection_drag
-        if not drag or drag['kind']!='move':return strokes
+        if not drag:return strokes
+        if drag['kind']=='scale':
+            if page!=drag['page']:return strokes
+            anchor=drag.get('anchor');factor=drag.get('factor',1.0)
+            if anchor is None or abs(factor-1.0)<1e-9:return strokes
+            return scale_strokes(strokes,self.selected_indices,anchor,factor)
+        if drag['kind']!='move':return strokes
         target=drag.get('target',drag['page'])
         if target!=drag['page']:
             if page==drag['page']:return [s for i,s in enumerate(strokes) if i not in self.selected_indices]
@@ -312,6 +379,8 @@ class SelectionMixin:
             if rect is None:return
             rect=rect.adjusted(-3,-3,3,3)
             if drag and drag['kind']=='move':rect.translate(drag['dx'],drag['dy'])
+            elif drag and drag['kind']=='scale':
+                rect=QRectF(*drag['preview']).adjusted(-3,-3,3,3)
         nw,nh=self.editPageSize(page)
         box=QRectF(target.left()+rect.x()*target.width()/nw,target.top()+rect.y()*target.height()/nh,rect.width()*target.width()/nw,rect.height()*target.height()/nh)
         painter.save();painter.setClipRect(target);painter.setRenderHint(painter.RenderHint.Antialiasing)
@@ -319,9 +388,12 @@ class SelectionMixin:
         source=drag['page'] if drag and drag['kind']=='move' else page
         strokes=self.edits.state(source)[0]
         indices=drag.get('preview_indices',drag.get('base_indices',set())) if drag and drag['kind']=='box' else self.selected_indices
-        if drag and drag['kind']=='move':
+        if drag and drag['kind'] in ('move','scale'):
             painter.save();painter.translate(target.left(),target.top());painter.scale(target.width()/nw,target.height()/nh)
-            painter.translate(drag['dx'],drag['dy'])
+            if drag['kind']=='move':painter.translate(drag['dx'],drag['dy'])
+            else:
+                ax,ay=drag['anchor'];f=drag.get('factor',1.0)
+                painter.translate(ax,ay);painter.scale(f,f);painter.translate(-ax,-ay)
             pen=QPen(QColor(37,99,235,180),1.2);pen.setCosmetic(True)
             painter.setPen(pen);painter.setBrush(QColor(82,169,255,40))
             for i in sorted(indices):
@@ -341,13 +413,13 @@ class SelectionMixin:
             painter.setBrush(QColor(82,169,255,70) if closed else QColor('white'))
             painter.drawEllipse(polygon[0],5 if closed else 3,5 if closed else 3)
         else:painter.drawRect(box)
-        if not drag or drag['kind']=='move':
-            if self.selection_region is not None:
+        if not drag or drag['kind'] in ('move','scale'):
+            if self.selection_region is not None and not (drag and drag['kind']=='scale'):
                 transform=QTransform();transform.translate(target.left(),target.top());transform.scale(target.width()/nw,target.height()/nh)
                 if drag:transform.translate(drag['dx'],drag['dy'])
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(QColor(82,169,255,160),1.2,Qt.PenStyle.DashLine))
                 painter.drawPath(transform.map(self.selection_region))
             painter.setPen(QPen(QColor('#52a9ff'),1.5));painter.setBrush(QColor('white'))
-            for corner in (box.topLeft(),box.topRight(),box.bottomLeft(),box.bottomRight()):painter.drawEllipse(corner,3,3)
+            for corner in (box.topLeft(),box.topRight(),box.bottomLeft(),box.bottomRight()):painter.drawEllipse(corner,4,4)
         painter.restore()

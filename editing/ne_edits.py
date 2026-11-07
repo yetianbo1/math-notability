@@ -9,6 +9,7 @@ from PyQt6.QtCore import QPointF,Qt
 from PyQt6.QtGui import QPainterPath,QTransform,QColor,QPen
 from editing.ne_inksmooth import smooth_points
 from editing.ne_inkcapture import stabilize_middle_point,CaptureFilter
+from editing.ne_ink_scale import scale_stroke
 
 COLORS={'红':'#e53935','黄':'#e6b800','绿':'#198754','蓝':'#1976d2','黑':'#202124'}
 HIGHLIGHT_COLORS={'黄':'#fff600','绿':'#b9f6ca','蓝':'#80d8ff','粉':'#f8bbd0','橙':'#ffcc80'}
@@ -360,6 +361,13 @@ class EditModel:
                 if op['kind']=='move':
                     output.append(replace(stroke,points=tuple((x+op['dx'],y+op['dy']) for x,y in stroke.points)))
             return output,changed
+        if op['kind']=='scale':
+            selected=set(op['indices']);changed=set(state[1]);output=[]
+            for index,stroke in enumerate(state[0]):
+                if index not in selected:output.append(stroke);continue
+                if stroke.source_id is not None:changed.add(stroke.source_id)
+                output.append(scale_stroke(stroke,op['anchor'],op['factor']))
+            return output,changed
         if op['kind']=='draw':
             stroke=Stroke(tuple(map(tuple,op['points'])),op['color'],op['width'],
                           op.get('opacity',1.0),tool=op.get('tool','pen'),
@@ -389,6 +397,25 @@ class EditModel:
         indices=tuple(sorted({i for i in indices if 0<=i<len(state[0])}))
         if not indices or (not delete and abs(dx)+abs(dy)<1e-8):return False
         op=dict(kind='delete' if delete else 'move',page=page,indices=indices,dx=dx,dy=dy)
+        result=self.apply(state,op)
+        del self.history[self.cursor:]
+        self.next_token+=1;self.history.append((self.next_token,op));self.cursor+=1
+        self.cache[page]=result;self.cache.move_to_end(page)
+        while len(self.cache)>8:self.cache.popitem(last=False)
+        return True
+
+    def scale_selection(self,page,indices,anchor,factor):
+        """One corner gesture is one undo entry; indices refer to its base state."""
+        self.finish()
+        factor=float(factor)
+        ax,ay=float(anchor[0]),float(anchor[1])
+        if not all(math.isfinite(v) for v in (ax,ay,factor)) or factor<=0:
+            raise ValueError('缩放参数无效')
+        if abs(factor-1.0)<1e-9:return False
+        state=self.state(page)
+        indices=tuple(sorted({i for i in indices if 0<=i<len(state[0])}))
+        if not indices:return False
+        op=dict(kind='scale',page=page,indices=indices,anchor=(ax,ay),factor=factor)
         result=self.apply(state,op)
         del self.history[self.cursor:]
         self.next_token+=1;self.history.append((self.next_token,op));self.cursor+=1
