@@ -1,0 +1,9 @@
+{
+  "model": "PP-OCRv5_mobile_det",
+  "converted_by": "RapidAI/RapidOCR",
+  "source": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_mobile.onnx",
+  "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
+  "license": "Apache-2.0",
+  "inference": "local CPU only; no network requests at runtime",
+  "size": 4819576
+}

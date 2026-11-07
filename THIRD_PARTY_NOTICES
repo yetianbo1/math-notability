@@ -1,0 +1,48 @@
+第三方许可与来源 / Third-party notices
+
+本文件用于说明已识别的主要来源，不替代各组件的完整许可文本，也不表示列举已穷尽。
+
+1. 上游 NotabilityViewer
+来源：https://github.com/GZhonghui/NotabilityViewer
+授权：MIT；上游及其派生代码的版权与许可声明如下，须按 MIT 条件保留。
+
+MIT License
+
+Copyright (c) 2023 GZhonghui
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+2. PyQt6
+来源：https://www.riverbankcomputing.com/software/pyqt/
+授权：GPL v3 或商业许可证，取决于实际取得的授权。本项目使用的开源发行包须遵守 GPL v3。
+Qt 运行库及其插件另有对应的 LGPL/GPL 或其他许可；以实际依赖包所附完整许可为准。
+
+3. PyMuPDF / MuPDF
+来源：https://pymupdf.readthedocs.io/
+授权：AGPL v3 或商业许可证，取决于实际取得的授权。本项目使用的开源发行包须遵守 AGPL v3。
+分发或部署包含上述组件的程序时，应履行所用许可证要求；本项目的 0BSD 授权不能替代组件授权。
+
+4. 本地文字检测模型
+来源及模型信息：assets/local_ai_model.json
+授权：Apache-2.0，全文见 assets/LOCAL_AI_LICENSE。
+
+5. ONNX Runtime
+授权：MIT，全文见 assets/ONNX_RUNTIME_LICENSE；其他声明见 assets/ONNX_RUNTIME_NOTICES。
+
+其他依赖、资源与工具继续遵循随其发行的许可证；请同时保留依赖包所附的相关声明。

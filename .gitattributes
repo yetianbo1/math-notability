@@ -1,0 +1,10 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.ps1 text eol=lf
+*.bat text eol=crlf
+*.svg text eol=lf
+*.ico binary
+*.bin binary
+*.fb binary

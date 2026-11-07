@@ -1,0 +1,1 @@
+"""Desktop editor page container."""
