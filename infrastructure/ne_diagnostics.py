@@ -20,6 +20,9 @@ _level = 'INFO'
 _lock = threading.RLock()
 _previous_warning = None
 _previous_qt_handler = None
+# A repeated exception from a 30 ms timer must not queue hundreds of modal
+# dialogs: each one starts its own event loop and freezes the UI.
+_last_popup = {'key': None, 'at': 0.0}
 
 
 def current_level():
@@ -111,7 +114,8 @@ def install():
         file = path / ("session-" + time.strftime("%Y%m%d-%H%M%S") + ".log")
         _log = file.open("a", encoding="utf-8", buffering=1)
         _level = load_level()
-        _write("NotabilityEditor 0.7.9-Beta crash diagnostics")
+        from core.ne_app_version import APP_VERSION
+        _write("NotabilityEditor " + APP_VERSION + " crash diagnostics")
         _write("Python=" + sys.version.replace("\n", " "))
         _write("Platform=" + sys.platform + "; frozen=" + str(getattr(sys, "frozen", False)))
         _write('Log level: '+_level)
@@ -131,6 +135,24 @@ def _uncaught(exc_type, value, tb):
     with _lock:
         _write("UNHANDLED (including Qt signal/slot callback):")
         _write(''.join(traceback.format_exception(exc_type, value, tb)))
+    # A periodic exception (e.g. a 30 ms drag timer) must not queue a modal
+    # dialog on every tick.  Keep logging every occurrence, but show the same
+    # error at most once every few seconds.
+    last = None
+    cursor = tb
+    while cursor is not None:
+        last = (cursor.tb_frame.f_code.co_filename, cursor.tb_lineno)
+        cursor = cursor.tb_next
+    try:
+        key = (getattr(exc_type, '__name__', str(exc_type)), str(value), last)
+    except Exception:
+        key = (str(exc_type), '', last)
+    now = time.monotonic()
+    with _lock:
+        if key == _last_popup['key'] and now - _last_popup['at'] < 10.0:
+            return
+        _last_popup['key'] = key
+        _last_popup['at'] = now
     # Do not rethrow from the exception hook: in PyQt, doing so can terminate
     # the application without displaying any error message.
     try:

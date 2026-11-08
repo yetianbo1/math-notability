@@ -3,10 +3,12 @@ from collections import OrderedDict
 from dataclasses import replace
 from time import monotonic
 from PyQt6.QtCore import Qt,QRectF,QEvent,QByteArray,QBuffer,QIODevice,QSize,QTimer,QPointF
-from PyQt6.QtGui import QPainter,QPen,QColor,QImage,QCursor
+from PyQt6.QtGui import QPainter,QPen,QColor,QImage,QCursor,QPainterPath
+from PyQt6.QtWidgets import QApplication
 from editing.ne_edits import EditModel,Stroke,HIGHLIGHT_COLORS,svg_strokes,paint_strokes
 from editing.ne_selection import SelectionMixin
 from editing.ne_brushmetrics import brush_preview_radii
+from editing.ne_shapes import KINDS,clamp_point,shape_points
 from images.ne_image_resize import resize_corner
 from editing.ne_continuous_ink import ContinuousInkMixin
 
@@ -20,6 +22,7 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
         self.eraser_width=18.;self.eraser_mode='partial';self.hover_point=None
         self.initSelection()
         self._continuous_draw=None
+        self.shape_drag=None;self.shape_kind='line'
         self.sampling_precision=.05
         self.smart_interpolation=True
         (self.edits.core if hasattr(self.edits,'core') else self.edits).smart_interpolation=True
@@ -67,6 +70,7 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
         if image_selection_cleared:self.selectionChanged.emit(len(self.selected_indices))
         self._updatePointerHover(self.hover_point)
         self.update()
+        if hasattr(self,'_updateCardButton'):self._updateCardButton()
 
     def _updatePointerHover(self, fallback=None):
         view = getattr(self.window(), 'editor_view', None)
@@ -92,15 +96,36 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
                      else Qt.CursorShape.SizeBDiagCursor)
         elif self.edit_tool == 'read' or (self.hover_point is not None and self.pointOnPage(self.hover_point) is None):
             shape = Qt.CursorShape.OpenHandCursor
-        elif self.edit_tool in ('erase', 'select', 'image'):
+        elif self.edit_tool in ('erase', 'select', 'image', 'shape'):
             shape = Qt.CursorShape.CrossCursor
         else:
             shape = Qt.CursorShape.ArrowCursor
         if self.cursor().shape() != shape:
             self.setCursor(shape)
 
-    def _readingScrollArea(self):
+    def _scrollArea(self):
+        """The enclosing QScrollArea, or None for a card / viewer-less canvas.
+
+        Every QWidget already owns a built-in ``scroll(dx, dy)`` method, so on
+        a question-card window ``getattr(window, 'scroll', None)`` returns a
+        builtin_function_or_method rather than None.  Only the main window's
+        QScrollArea has viewport()/verticalScrollBar(); callers must ignore
+        anything else instead of treating it as a scrollable viewport.
+        """
         scroll=getattr(self.window(),'scroll',None)
+        if (scroll is None or not hasattr(scroll,'viewport')
+                or not hasattr(scroll,'verticalScrollBar')):
+            return None
+        return scroll
+
+    def _startDragScrollTimer(self):
+        """Edge auto-scroll belongs to the scrollable notebook only."""
+        if getattr(self,'card_sheet',False) or self._scrollArea() is None:
+            return
+        self._drag_scroll_timer.start()
+
+    def _readingScrollArea(self):
+        scroll=self._scrollArea()
         if scroll is None:
             return None
         vbar=scroll.verticalScrollBar();hbar=scroll.horizontalScrollBar()
@@ -255,13 +280,83 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
         nw,nh=self.editPageSize(page)
         return page,((point.x()-left)*nw/w,(point.y()-top)*nh/h)
 
+    def shapePagePoint(self,page,position):
+        """Page coordinates for a pointer that may have left the paper."""
+        w,h=self.draw_sizes[page];left=(self.width()-w)/2;top=self.pageTop(page)
+        nw,nh=self.editPageSize(page)
+        x=(position.x()-left)*nw/w;y=(position.y()-top)*nh/h
+        return clamp_point((x,y),(nw,nh))
+
+    def shapePointsForDrag(self,drag):
+        return shape_points(drag['kind'],drag['start'],drag['current'],
+                            shift=drag['shift'],page_size=self.editPageSize(drag['page']))
+
+    def beginShape(self,page,point,modifiers=Qt.KeyboardModifier.NoModifier):
+        if self._continuous_draw is not None:self.finishGesture()
+        self.edits.finish()
+        kind=getattr(self,'shape_kind','line')
+        if kind not in KINDS:kind='line'
+        self.shape_drag=dict(page=page,start=tuple(point),current=tuple(point),
+                             kind=kind,shift=bool(modifiers & Qt.KeyboardModifier.ShiftModifier),
+                             color=self.pen_color,width=self.pen_width)
+        self.setFocus();self.update();return True
+
+    def extendShape(self,position):
+        drag=self.shape_drag
+        if drag is None:return
+        drag['current']=self.shapePagePoint(drag['page'],position)
+        drag['shift']=bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        self.update()
+
+    def finishShape(self,cancel=False):
+        drag=self.shape_drag
+        if drag is None:return False
+        self.shape_drag=None
+        if not cancel:
+            try:
+                points=self.shapePointsForDrag(drag)
+                if self.edits.add_shape(drag['page'],points,drag['color'],drag['width']):
+                    self.editsChanged.emit()
+            except ValueError:
+                pass  # A tap or a degenerate drag simply draws nothing.
+        self.update();return True
+
+    def paintShapePreview(self,painter):
+        drag=getattr(self,'shape_drag',None)
+        if drag is None or not self.show_ink:return
+        try:points=self.shapePointsForDrag(drag)
+        except ValueError:return
+        page=drag['page'];w,h=self.draw_sizes[page]
+        left=(self.width()-w)/2;top=self.pageTop(page)
+        nw,nh=self.editPageSize(page)
+        painter.save()
+        painter.setClipRect(QRectF(left,top,w,h))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing,True)
+        painter.translate(left,top);painter.scale(w/nw,h/nh)
+        pen=QPen(QColor(drag['color']),float(drag['width']),
+                 Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen);painter.setBrush(Qt.BrushStyle.NoBrush)
+        path=QPainterPath(QPointF(*points[0]))
+        for point in points[1:]:path.lineTo(*point)
+        painter.drawPath(path)
+        painter.restore()
+
     def beginGesture(self,position,modifiers=Qt.KeyboardModifier.NoModifier):
         if self._continuous_draw is not None:self.finishGesture()
+        # The "make a card" action is painted into the canvas (see
+        # paintCardButton) instead of being a child widget, because the GPU
+        # viewport draws on top of all canvas children.  Hit-test it here so
+        # both mouse and tablet presses activate it.
+        if self.edit_tool=='select' and self.hitCardButton(position):
+            self._createQuestionCardFromSelection()
+            self.update();return True
         hit=self.pointOnPage(position)
         if self.edit_tool in ('read','image') or not self.show_ink:return False
         if self.edit_tool=='select':return self.beginSelection(position,modifiers)
         if hit is None:return False
-        page,point=hit;kind='erase' if self.edit_tool=='erase' else 'draw'
+        page,point=hit
+        if self.edit_tool=='shape':return self.beginShape(page,point,modifiers)
+        kind='erase' if self.edit_tool=='erase' else 'draw'
         if getattr(self,'seamless_pages',False) and self.edit_tool in ('draw','highlight','tape','erase'):
             self._beginContinuousDraw(page,point,position)
             self.setFocus();self.update();return True
@@ -281,6 +376,7 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
         self.setFocus();self.update();return True
 
     def extendGesture(self,position):
+        if getattr(self,'shape_drag',None) is not None:self.extendShape(position);return
         if self.selection_drag:self.extendSelection(position);return
         if self._continuous_draw is not None:
             self._extendContinuousDraw(position);return
@@ -337,6 +433,7 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
         if hasattr(self,'_drag_scroll_timer'):self._drag_scroll_timer.stop()
         if getattr(self,'_image_history_before',None) is not None:self.finishImageGesture()
         if hasattr(self,'selection_drag') and self.selection_drag:self.finishSelection()
+        if getattr(self,'shape_drag',None) is not None:self.finishShape()
         continuous=self._finishContinuousDraw()
         if hasattr(self,'edits') and (self.edits.finish() or continuous):self.editsChanged.emit()
         self.update()
@@ -352,6 +449,14 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
     def mousePressEvent(self,event):
         stamp=event.timestamp() if hasattr(event,'timestamp') else 0
         self._input_time=stamp/1000 if stamp else None
+        # Ctrl+click a marked question to reopen its card. Intercept before
+        # the reading-tool pan and before any ink gesture, so it never draws,
+        # selects or erases by accident. Card canvases have no card list and
+        # therefore never trigger this.
+        if (event.button()==Qt.MouseButton.LeftButton
+                and hasattr(self,'tryOpenCardAt')
+                and self.tryOpenCardAt(event.position(),event.modifiers())):
+            event.accept();return
         if event.button()==Qt.MouseButton.LeftButton and self.edit_tool=='read':
             if self.beginReadingPan(event.position(),event.globalPosition()):
                 event.accept();return
@@ -373,7 +478,7 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
                 item=self.editableImageItem(page,identifier)
                 if item and not item['locked']:self.beginImageGesture()
                 self._image_drag=(page,identifier,point,item['x'],item['y']) if item and not item['locked'] else None
-                if self._image_drag:self._drag_scroll_timer.start()
+                if self._image_drag:self._startDragScrollTimer()
                 if identifier.startswith('native:'):
                     window=self.window()
                     if hasattr(window,'statusBar'):
@@ -395,7 +500,7 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
         self.hover_point=event.position()
         self._syncBrushCursor()
         if event.button()==Qt.MouseButton.LeftButton and self.beginGesture(event.position(),event.modifiers()):
-            if self.selection_drag and self.selection_drag['kind']=='move':self._drag_scroll_timer.start()
+            if self.selection_drag and self.selection_drag['kind']=='move':self._startDragScrollTimer()
             event.accept()
         else:super().mousePressEvent(event)
 
@@ -417,8 +522,12 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
         if getattr(self,'_image_drag',None):
             self._moveImageDrag(event.position())
             event.accept();return
+        hover=bool(self.edit_tool=='select' and self.hitCardButton(event.position()))
+        if hover!=getattr(self,'_card_button_hover',False):
+            self._card_button_hover=hover;self.update()
         self._updatePointerHover(event.position());self.extendGesture(event.position())
-        if self.edits.pending or self.selection_drag or self._continuous_draw is not None:event.accept()
+        if (self.edits.pending or self.selection_drag or self._continuous_draw is not None
+                or getattr(self,'shape_drag',None) is not None):event.accept()
         else:super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self,event):
@@ -434,7 +543,7 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
             self._moveImageDrag(event.position())
             self.finishImageGesture()
             self.editsChanged.emit();self.update();event.accept();return
-        if event.button()==Qt.MouseButton.LeftButton and (self.edits.pending or self.selection_drag or self._continuous_draw is not None):
+        if event.button()==Qt.MouseButton.LeftButton and (self.edits.pending or self.selection_drag or self._continuous_draw is not None or getattr(self,'shape_drag',None) is not None):
             self._force_endpoint=True
             try:self.extendGesture(event.position());self.finishGesture();event.accept()
             finally:self._force_endpoint=False
@@ -455,8 +564,10 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
     def _scrollWhileDragging(self):
         active=getattr(self,'_image_drag',None) or self._continuous_draw is not None or (self.selection_drag and self.selection_drag['kind']=='move')
         if not active:self._drag_scroll_timer.stop();return
-        scroll=getattr(self.window(),'scroll',None)
-        if scroll is None:return
+        scroll=self._scrollArea()
+        if scroll is None:
+            # A card sheet has no scroll bars; no edge scrolling is needed.
+            self._drag_scroll_timer.stop();return
         position=QCursor.pos();viewport=scroll.viewport();point=viewport.mapFromGlobal(position)
         if not -32<=point.x()<=viewport.width()+32:return
         dy=(-20 if point.y()<36 else 20 if point.y()>viewport.height()-36 else 0)
@@ -483,6 +594,9 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
             event.accept();return
         self._moveHover(event.position())
         if event.type()==QEvent.Type.TabletPress:
+            if (hasattr(self,'tryOpenCardAt')
+                    and self.tryOpenCardAt(event.position(),event.modifiers())):
+                event.accept();return
             if not self.beginGesture(event.position(),event.modifiers()):event.ignore();return
         elif event.type()==QEvent.Type.TabletMove:self.extendGesture(event.position())
         elif event.type()==QEvent.Type.TabletRelease:
@@ -507,6 +621,7 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
             self._cancelReadingPan();self._syncBrushCursor()
             self._finishContinuousDraw(cancel=True)
             self.edits.cancel()
+            if getattr(self,'shape_drag',None) is not None:self.finishShape(cancel=True)
             if hasattr(self,'finishImageGesture'):self.finishImageGesture(cancel=True)
             if hasattr(self,'selected_image'):self.selected_image=None
             self.clearSelection();self.update();event.accept()

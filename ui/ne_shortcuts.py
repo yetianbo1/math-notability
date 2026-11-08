@@ -67,7 +67,7 @@ class ShortcutManager:
             'fit': owner.fit_action, 'goto': owner.goto_action,
             'sidebar': owner.page_toggle_action, 'help': owner.help_action,
         }
-        actions.update({key: owner.tools[key] for key in ('draw', 'highlight', 'erase', 'select', 'image', 'read')})
+        actions.update({key: owner.tools[key] for key in ('draw', 'shape', 'highlight', 'erase', 'select', 'image', 'read')})
         for name, action in actions.items():
             shortcuts = [QKeySequence.fromString(s, QKeySequence.SequenceFormat.PortableText)
                          for s in self.bindings[name].split(';') if s]

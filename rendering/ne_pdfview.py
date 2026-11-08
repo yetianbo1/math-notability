@@ -464,6 +464,7 @@ class PdfNoteCanvas(EditingMixin, QWidget):
         self.clearCache()
         self._syncBrushCursor()
         self.update()
+        if hasattr(self,'_updateCardButton'):self._updateCardButton()
 
     def setSeamlessPages(self,enabled):
         enabled=bool(enabled)
@@ -824,6 +825,11 @@ class PdfNoteCanvas(EditingMixin, QWidget):
                     painter.drawImage(target,image)
                     if use_tiles:self.view_tiles.paint(painter,page,target,dpr)
                     else:self.content_cache.paint(self,painter,page,target,dpr)
+                    # Light "already has a card" marks are a screen-only edit
+                    # aid: they live in paintVisible(), so PDF export (which
+                    # paints through paint_content()) never includes them.
+                    if hasattr(self,'paintCardMarks'):
+                        self.paintCardMarks(painter,page,target)
                     if self.show_ink:
                         self.paintSelectionOverlay(painter,page,target)
                     self.paintImageSelection(painter,page,target)
@@ -844,6 +850,15 @@ class PdfNoteCanvas(EditingMixin, QWidget):
             try:
                 self.paintEraserCursor(painter)
                 self.paintBrushCursor(painter)
+                if hasattr(self,'paintShapePreview'):self.paintShapePreview(painter)
+                # Draw the floating question-card action here rather than as a
+                # child widget: the optional QOpenGLWidget overlays the whole
+                # viewport and repaints the canvas through this very method.
+                if hasattr(self,'paintCardButton'):
+                    painter.save()
+                    painter.setClipping(False)
+                    try:self.paintCardButton(painter)
+                    finally:painter.restore()
             except Exception as exc:
                 diagnostic_exception('paint tool cursor',exc)
         except Exception as exc:

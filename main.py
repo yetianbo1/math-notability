@@ -1,4 +1,4 @@
-"""NotabilityEditor 0.7.9-Beta - local note viewer and ink editor."""
+"""NotabilityEditor - local note viewer and ink editor (version: core.ne_app_version)."""
 # Release channel: relese. Same-base relese outranks every internal vN.
 # Compatibility revision: 2026-10-29 (native paper ranges and shapes).
 # Seamless pages: 2026-10-29, cross-page drawing and erasure.
@@ -20,6 +20,7 @@ from formats.ne_loader import prepare_note, LoadCancelled
 from infrastructure.ne_diagnostics import (install as install_diagnostics, stage as diagnostic_stage,
                             exception as diagnostic_exception, warning as diagnostic_warning,
                             log_directory)
+from core.ne_app_version import APP_VERSION
 from core.ne_filetypes import file_action
 from import_export.ne_pdfimport import pdf_to_ntb, PdfImportCancelled
 from import_export.ne_importdraft import ImportDraft
@@ -126,13 +127,14 @@ class SaveWorker(QThread):
     ready = pyqtSignal(str,object)
     failed = pyqtSignal(str)
     baseline_ready = pyqtSignal(str)
-    def __init__(self,source,target,hidden,added,thumbnail,base_bundle,expected_bundle,parent=None,page_plan=None,image_payload=None,native_image_changes=None,native_image_lock_changes=None,native_image_deletions=None,native_image_layer_changes=None,session=None,snapshot=None,expected_stamp=None):
+    def __init__(self,source,target,hidden,added,thumbnail,base_bundle,expected_bundle,parent=None,page_plan=None,image_payload=None,native_image_changes=None,native_image_lock_changes=None,native_image_deletions=None,native_image_layer_changes=None,session=None,snapshot=None,expected_stamp=None,cards_payload=None):
         super().__init__(parent)
         self.source,self.target,self.hidden,self.added,self.thumbnail=source,target,hidden,added,thumbnail
         self.base_bundle,self.expected_bundle=base_bundle,expected_bundle
         self.stop=threading.Event();self.succeeded=False;self.page_plan=page_plan
         self.overwrite_error=None
         self.image_payload=image_payload
+        self.cards_payload=cards_payload
         self.native_image_changes=native_image_changes or {}
         self.native_image_lock_changes=native_image_lock_changes or {}
         self.native_image_deletions=native_image_deletions or set()
@@ -161,7 +163,7 @@ class SaveWorker(QThread):
         self.check_source()
         source=self.session.ensure_baseline(self.stop.is_set) if self.session else self.source
         expected=self.base_bundle if self.session else self.expected_bundle
-        if self.image_payload is None and not self.session:
+        if self.image_payload is None and self.cards_payload is None and not self.session:
             return write_ntb(self.source,target,self.hidden,self.added,self.progress.emit,
                              self.stop.is_set,self.thumbnail,base_bundle=self.base_bundle,
                              expected_bundle=self.expected_bundle,page_plan=self.page_plan,
@@ -181,6 +183,9 @@ class SaveWorker(QThread):
                              native_image_lock_changes=self.native_image_lock_changes,
                              native_image_deletions=self.native_image_deletions,native_image_layer_changes=self.native_image_layer_changes)
             if self.stop.is_set():raise LoadCancelled()
+            if self.cards_payload is not None:
+                from document_core.ne_question_cards import write_cards
+                write_cards(stage,self.cards_payload)
             pages,assets=self.image_payload or ([],{})
             def check_source():
                 # Packing Viewer images can take time after the native writer
@@ -284,13 +289,22 @@ class Viewer(QMainWindow):
         self._snapshot_timer.setInterval(2000)
         self._snapshot_timer.timeout.connect(self.persist_recovery_snapshot)
         self._save_notice = None
+        self._scratch_window = None
+        self._question_cards=[]
+        self._question_card_assets={}
+        self._question_card_windows={}
+        self._cards_dirty=False
+        self._card_autosave_timer=QTimer(self)
+        self._card_autosave_timer.setSingleShot(True)
+        self._card_autosave_timer.setInterval(1500)
+        self._card_autosave_timer.timeout.connect(self._card_autosave_timeout)
         self._image_compat_notice_shown=False
         self._page_history_path = None
         self._page_history_ready = False
         self._restoring_page = False
         self.zoom = 1.0
         self.fit_width = False
-        self.setWindowTitle('NotabilityEditor 0.7.9-Beta')
+        self.setWindowTitle('NotabilityEditor ' + APP_VERSION)
         self.setWindowIcon(QIcon(str(icon_path())))
         self.resize(1100,800)
         self.setMinimumSize(720,400)
@@ -402,8 +416,9 @@ class Viewer(QMainWindow):
         if self.fit_width:QTimer.singleShot(0,self.fit)
 
     def build_edit_toolbar(self):
-        self.addToolBarBreak()
+        # The editing toolbar has a single fixed dock position: the top row.
         self.edit_toolbar=self.addToolBar('笔迹编辑');self.edit_toolbar.setMovable(False)
+        self.insertToolBarBreak(self.edit_toolbar)
         self.edit_toolbar.setStyleSheet('QToolBar { background:#ffffff; border:0; spacing:0; padding:0; }')
         self.editor_panel=EditorPanel(self);self.edit_toolbar.addWidget(self.editor_panel)
         self.edit_toolbar.setEnabled(False)
@@ -419,8 +434,198 @@ class Viewer(QMainWindow):
             self.canvas.tape_pattern=self.current_tape_pattern
             self.canvas.eraser_width=self.erase_size.value()
             self.canvas.eraser_mode='partial' if self.erase_mode.currentIndex()==0 else 'stroke'
+            self.canvas.shape_kind=getattr(self,'shape_kind','line')
             self.canvas._syncBrushCursor()
             self.canvas.update()
+        self.sync_scratch_pad()
+
+    def sync_scratch_pad(self):
+        scratch=getattr(self,'_scratch_window',None)
+        if scratch is not None:
+            try:
+                if sip.isdeleted(scratch):self._scratch_window=None
+                else:scratch.sync_settings()
+            except (RuntimeError,AttributeError):
+                self._scratch_window=None
+        self.sync_question_cards()
+
+    def sync_question_cards(self):
+        from ui.ne_scratch import sync_canvas_settings
+        for card_id,window in list(getattr(self,'_question_card_windows',{}).items()):
+            try:
+                if sip.isdeleted(window):
+                    self._question_card_windows.pop(card_id,None);continue
+                sync_canvas_settings(self,window.canvas)
+                if hasattr(window,'sync_toolbar'):window.sync_toolbar()
+            except (RuntimeError,AttributeError):
+                self._question_card_windows.pop(card_id,None)
+
+    def open_scratch_pad(self):
+        scratch=getattr(self,'_scratch_window',None)
+        try:
+            if scratch is not None and not sip.isdeleted(scratch) and scratch.isVisible():
+                scratch.raise_();scratch.activateWindow();return
+        except RuntimeError:
+            scratch=None
+        from ui.ne_scratch import ScratchWindow
+        self._scratch_window=ScratchWindow(self)
+        self._scratch_window.show()
+        self.statusBar().showMessage('草稿纸：写完后点「贴到当前页」保留；直接关闭即丢弃 · Ctrl+Z 撤销',6000)
+
+    # ---------------------------------------------------------- question cards
+    def mark_cards_dirty(self):
+        self._cards_dirty=True
+
+    def schedule_card_autosave(self):
+        """A card stroke finished: debounce a silent write of the whole note."""
+        self._cards_dirty=True
+        self._close_flush_done=False
+        timer=getattr(self,'_card_autosave_timer',None)
+        if timer is not None:timer.start()
+
+    def _card_autosave_timeout(self):
+        self._card_autosave()
+
+    def flush_card_autosave(self):
+        """Commit pending card ink before a window closes / the app exits."""
+        timer=getattr(self,'_card_autosave_timer',None)
+        if timer is not None:timer.stop()
+        if self._cards_dirty:self._card_autosave()
+
+    def _card_autosave(self):
+        if not self._cards_dirty:return
+        if (self.saver or self.worker or self.pdf_importer or self.prepared is None
+                or not self.prepared.path.lower().endswith('.ntb')):
+            return  # save_finished() will drain the queued state
+        if self._active_unsaved_draft() is not None:
+            return  # no formal file on disk yet; Ctrl+S must ask for a path
+        # Never let an automatic save raise a destructive "rebuild grouped
+        # pages" confirmation or a Save As dialog.
+        edits=getattr(getattr(self,'canvas',None),'edits',None)
+        plan=edits.page_plan() if edits is not None and hasattr(edits,'page_plan') else None
+        if plan is not None and getattr(self.canvas,'page_edit_kind',None) in (
+                'official_grouped_pdf','official_grouped_paper',
+                'materialized_grouped_pdf','ntb18_mixed_pdf'):
+            return
+        self.save_ntb(silent=True)
+
+    def _load_question_cards(self):
+        self._question_cards=[];self._question_card_assets={};self._cards_dirty=False
+        path=getattr(self.prepared,'path','') if self.prepared else ''
+        if not str(path).lower().endswith('.ntb'):return
+        try:
+            from document_core.ne_question_cards import read_cards
+            self._question_cards,self._question_card_assets=read_cards(path)
+            if self._question_cards:
+                diagnostic_stage(f'install note: restored {len(self._question_cards)} question cards')
+        except Exception as exc:
+            diagnostic_exception('load question cards',exc)
+            self.statusBar().showMessage('题目卡数据读取失败，原笔记内容未受影响',6000)
+
+    def _cards_payload(self):
+        from document_core.ne_question_cards import VERSION
+        cards=[dict(card) for card in self._question_cards]
+        used={card['asset'] for card in cards}
+        assets={digest:self._question_card_assets[digest] for digest in used
+                if digest in self._question_card_assets}
+        if used-set(assets):raise ValueError('题目卡截图素材缺失，已停止保存以保护笔记')
+        return {'version':VERSION,'cards':cards,'assets':assets}
+
+    def _sync_open_cards(self):
+        for card_id,window in list(getattr(self,'_question_card_windows',{}).items()):
+            try:
+                if sip.isdeleted(window):continue
+                data=window.card_data()
+            except (RuntimeError,AttributeError):
+                continue
+            self.update_question_card(card_id,data)
+
+    def update_question_card(self,card_id,data):
+        for index,card in enumerate(self._question_cards):
+            if card['id']==card_id:
+                if card!=data:
+                    self._question_cards[index]=data
+                    self._cards_dirty=True
+                return
+
+    def create_question_card(self,page,rect):
+        from ui.ne_question_card import capture_page_rect,make_card
+        if not self.prepared or not self.prepared.path.lower().endswith('.ntb'):
+            QMessageBox.information(self,'题目卡','请先打开一份 NTB 笔记，再框选题目制作卡片。')
+            return None
+        if not hasattr(self.canvas,'_render_page'):return None
+        try:
+            rendered=capture_page_rect(self.canvas,page,rect)
+        except Exception as exc:
+            diagnostic_exception('capture question card',exc)
+            QMessageBox.warning(self,'题目卡','题目区域截取失败：'+str(exc))
+            return None
+        if rendered is None:return None
+        number=max((card['number'] for card in self._question_cards),default=0)+1
+        card=make_card(page,number,rect,rendered)
+        self._question_cards.append(card)
+        self._question_card_assets[card['asset']]=rendered[0]
+        self._cards_dirty=True
+        window=self._open_card_window(card)
+        self.statusBar().showMessage(
+            f'第 {page+1} 页 · 题目卡 {number:02d} 已创建；写字自动保存，关闭后从「工具 → 题目卡」重新打开',7000)
+        return window
+
+    def _open_card_window(self,card):
+        from ui.ne_question_card import QuestionCardWindow
+        existing=self._question_card_windows.get(card['id'])
+        try:
+            if existing is not None and not sip.isdeleted(existing):
+                existing.show();existing.raise_();existing.activateWindow()
+                if not existing.is_card_fullscreen():existing.enter_fullscreen()
+                return existing
+        except RuntimeError:
+            pass
+        blob=self._question_card_assets.get(card['asset'])
+        if blob is None:
+            self.statusBar().showMessage('题目卡截图素材缺失，无法打开',6000)
+            return None
+        window=QuestionCardWindow(self,card,blob)
+        self._question_card_windows[card['id']]=window
+        window.show()
+        # Both newly created cards and cards reopened from Tools > Question
+        # cards start full-screen; 还原 / Esc still returns to a small window.
+        window.enter_fullscreen()
+        return window
+
+    def open_question_card(self,card_id):
+        card=next((item for item in self._question_cards if item['id']==card_id),None)
+        return self._open_card_window(card) if card is not None else None
+
+    def delete_question_card(self,card_id):
+        before=len(self._question_cards)
+        self._question_cards=[card for card in self._question_cards if card['id']!=card_id]
+        if len(self._question_cards)!=before:self._cards_dirty=True
+        self.statusBar().showMessage('题目卡已删除；保存笔记后生效',5000)
+
+    def _close_question_card_windows(self):
+        for window in list(getattr(self,'_question_card_windows',{}).values()):
+            try:
+                if not sip.isdeleted(window):
+                    window._deleted=True
+                    window.close()
+            except RuntimeError:
+                pass
+        self._question_card_windows.clear()
+
+    def refresh_question_cards_menu(self):
+        menu=getattr(self,'question_cards_menu',None)
+        if menu is None:return
+        menu.clear()
+        if not self._question_cards:
+            empty=menu.addAction('（暂无题目卡：用「选择」框住题目后点「做成卡片」）')
+            empty.setEnabled(False)
+            return
+        for card in sorted(self._question_cards,key=lambda item:(item['page'],item['number'])):
+            label=f"第 {card['page']+1} 页 · 题目卡 {card['number']:02d}"
+            action=menu.addAction(label)
+            action.triggered.connect(
+                lambda checked=False,card_id=card['id']:self.open_question_card(card_id))
 
     def remember_tool_setting(self,key,value):
         self.color_settings.setValue(key,value)
@@ -530,14 +735,21 @@ class Viewer(QMainWindow):
         action.setChecked(True)
         favorites=(self.editor_panel.pen_favorites if tool=='draw' else self.editor_panel.highlight_favorites)
         favorites.sync_selection()
+        panel=getattr(self,'editor_panel',None)
+        if tool=='draw' and panel is not None and hasattr(panel,'sync_shape_colors'):
+            panel.sync_shape_colors(self.current_color,custom=self.pen_color_is_custom)
 
-    def select_color(self,color):
+    def select_color(self,color,*,switch_tool=True):
         self.current_color=color;self.pen_color_is_custom=False
         self.color_settings.setValue('draw/preset_color',color)
         self.color_settings.setValue('draw/use_custom',False)
         self.color_settings.sync()
         self._sync_color_selection('draw')
-        self.tools['draw'].setChecked(True);self.select_tool('draw')
+        if switch_tool:
+            self.tools['draw'].setChecked(True);self.select_tool('draw')
+        else:
+            # Shape tool shares the pen color; do not jump back to the pen.
+            self.update_edit_settings()
 
     def select_highlight_color(self,color):
         self.current_highlight_color=color;self.highlight_color_is_custom=False
@@ -547,7 +759,7 @@ class Viewer(QMainWindow):
         self._sync_color_selection('highlight')
         self.tools['highlight'].setChecked(True);self.select_tool('highlight')
 
-    def choose_custom_color(self,tool,replace_color=None):
+    def choose_custom_color(self,tool,replace_color=None,*,switch_tool=True):
         """Pick arbitrary RGB; highlight alpha remains controlled by its opacity setting."""
         if tool=='draw':
             initial=self.current_color
@@ -567,13 +779,14 @@ class Viewer(QMainWindow):
                     max(screen.top(),min(anchor.y()+8,screen.bottom()-dialog.height())))
         try:
             if dialog.exec()==CustomColorDialog.DialogCode.Accepted:
-                self.apply_custom_color(tool,dialog.color.name(QColor.NameFormat.HexRgb))
+                self.apply_custom_color(tool,dialog.color.name(QColor.NameFormat.HexRgb),
+                                        switch_tool=switch_tool)
             else:
                 self._sync_color_selection(tool)
         finally:
             dialog.deleteLater()
 
-    def apply_custom_color(self,tool,rgb):
+    def apply_custom_color(self,tool,rgb,*,switch_tool=True):
         """A favorite is a remembered custom RGB; highlight opacity stays independent."""
         if tool=='draw':
             self.custom_pen_color=self.current_color=rgb
@@ -589,8 +802,21 @@ class Viewer(QMainWindow):
         self.color_settings.setValue(tool+'/use_custom',True)
         self.color_settings.sync()
         self._sync_color_selection(tool)
-        self.tools[tool].setChecked(True)
-        self.select_tool(tool)
+        if switch_tool:
+            self.tools[tool].setChecked(True)
+            self.select_tool(tool)
+        else:
+            self.update_edit_settings()
+
+    def select_shape(self,kind):
+        from editing.ne_shapes import KINDS,LABELS
+        if kind not in KINDS:return
+        self.shape_kind=kind
+        self.color_settings.setValue('shape/kind',kind)
+        self.color_settings.sync()
+        if hasattr(self,'editor_panel'):self.editor_panel.sync_shape(kind)
+        self.update_edit_settings()
+        self.statusBar().showMessage(f'图形：{LABELS[kind]} · 拖动画出 · 按住 Shift 出正形')
 
     def restore_edit_tool(self):
         tool = self.color_settings.value('editor/last_tool', 'read')
@@ -611,6 +837,7 @@ class Viewer(QMainWindow):
             self.ink.setChecked(True);self.canvas.setInkVisible(True)
         self.tools[tool].setChecked(True);self.editor_panel.set_tool(tool)
         self.update_edit_settings();self.canvas.setEditTool(tool)
+        self.sync_scratch_pad()
         if remember and self.prepared and self.prepared.path.lower().endswith('.ntb'):
             self.color_settings.setValue('editor/last_tool', tool)
             self.color_settings.sync()
@@ -620,6 +847,7 @@ class Viewer(QMainWindow):
         if tool=='image':self.statusBar().showMessage('选中图片后可跨页拖动，或点击“移动到页面…”；已锁定图片需先解锁，四角控制点用于等比例缩放。')
         if tool=='erase':self.statusBar().showMessage('橡皮擦仅擦除笔迹 · 可拖动连续擦除 · Ctrl+Z 撤销 · Esc 取消当前操作')
         if tool=='draw':self.statusBar().showMessage('画笔：移入页面可预览笔尖 · 宽度 0.1～128 · Ctrl+Z 撤销')
+        if tool=='shape':self.statusBar().showMessage('图形：拖动画出直线/圆/三角/矩形 · 按住 Shift 出正形或 45° 直线 · 颜色笔宽跟随画笔 · Ctrl+Z 撤销')
         if tool=='highlight':self.statusBar().showMessage('荧光笔：移入页面可预览半透明笔尖 · 宽度 0.1～256 · Ctrl+Z 撤销')
         if tool=='tape':self.statusBar().showMessage('遮字胶带：拖动遮盖内容 · Ctrl+Shift+T 临时揭开/恢复 · 选择工具移动 · 橡皮擦移除')
 
@@ -928,7 +1156,7 @@ class Viewer(QMainWindow):
         if choice==CHOICE_SAVE:self.save_ntb(after=after)
         return False
 
-    def save_ntb(self,after=None,save_as=False):
+    def save_ntb(self,after=None,save_as=False,silent=False):
         if self.saver:
             if not save_as:
                 self._save_queued = True
@@ -937,11 +1165,16 @@ class Viewer(QMainWindow):
             return
         if self.worker or self.pdf_importer or not self.prepared or not self.prepared.path.lower().endswith('.ntb'):return
         self.canvas.finishGesture()
+        self._sync_open_cards()
         draft=self._active_unsaved_draft()
         first_save=draft is not None
+        if silent and (first_save or save_as):
+            # An automatic save must never open a file dialog.
+            return
         if (not save_as and not first_save and not self.canvas.edits.dirty
                 and not self.canvas.image_layers.dirty
-                and not self.canvas.official_image_edits.dirty):
+                and not self.canvas.official_image_edits.dirty
+                and not self._cards_dirty):
             self.statusBar().showMessage('当前文件已保存，没有新的修改')
             if after:
                 QTimer.singleShot(0,after)
@@ -990,7 +1223,7 @@ class Viewer(QMainWindow):
             # Only an explicitly changed page_plan may enter a destructive path.
         target=str(Path(target).resolve())
         plan=self.canvas.edits.page_plan() if hasattr(self.canvas.edits,'page_plan') else None
-        if plan is not None and getattr(self.canvas,'page_edit_kind',None) in (
+        if not silent and plan is not None and getattr(self.canvas,'page_edit_kind',None) in (
                 'official_grouped_pdf','official_grouped_paper',
                 'materialized_grouped_pdf','ntb18_mixed_pdf'):
             choice=QMessageBox.question(self,'官方分组页面保存确认',
@@ -1006,37 +1239,52 @@ class Viewer(QMainWindow):
         try:
             snapshot=capture_save(self.canvas,self._edit_revision,self.canvas.thumbnailBytes())
             data=snapshot.data
+            cards_payload=self._cards_payload()
             if ((data['native_image_changes'] or data['native_image_lock_changes'] or data['native_image_deletions'] or data['native_image_layer_changes'])
                     and plan is not None and self.canvas.page_edit_kind!='native_per_page'):
                 raise ValueError('此分组笔记的图片修改与页面调整需分次保存。当前编辑仍保留。')
         except Exception as exc:
-            QMessageBox.warning(self,'无法准备导出',str(exc));return
+            if silent:
+                diagnostic_exception('auto save question cards',exc)
+            else:
+                QMessageBox.warning(self,'无法准备导出',str(exc))
+            return
+        self._save_silent=bool(silent)
         self.after_save=after
         self._save_notice=None
         # Only an explicit Save As (or first PDF draft save) should display a path.
-        self._save_request_show_path=bool(save_as or first_save)
+        self._save_request_show_path=bool(save_as or first_save) and not silent
         self.save_progress=prepare_progress(QProgressDialog('正在写入并校验 NTB…','取消',0,100,self),'正在保存笔记')
         self.save_progress.setWindowModality(Qt.WindowModality.NonModal)
         self.save_progress.setMinimumDuration(2147483647);self.save_progress.setAutoClose(False)
-        self._save_status=QWidget(self)
-        status_layout=QHBoxLayout(self._save_status);status_layout.setContentsMargins(0,0,0,0)
-        status_progress=QProgressBar();status_progress.setRange(0,100);status_progress.setFixedWidth(110)
-        cancel_save=QPushButton('取消保存');cancel_save.setFlat(True)
-        status_layout.addWidget(status_progress);status_layout.addWidget(cancel_save)
-        self.statusBar().addPermanentWidget(self._save_status)
+        self._save_status=None
+        if not silent:
+            self._save_status=QWidget(self)
+            status_layout=QHBoxLayout(self._save_status);status_layout.setContentsMargins(0,0,0,0)
+            status_progress=QProgressBar();status_progress.setRange(0,100);status_progress.setFixedWidth(110)
+            cancel_save=QPushButton('取消保存');cancel_save.setFlat(True)
+            status_layout.addWidget(status_progress);status_layout.addWidget(cancel_save)
+            self.statusBar().addPermanentWidget(self._save_status)
         self.saver=SaveWorker(self.prepared.path,target,base_bundle=self.prepared.bundle_data,
                               expected_bundle=self.disk_bundle,parent=self,session=self.save_session,
-                              snapshot=snapshot,expected_stamp=self.disk_stamp,**data)
+                              snapshot=snapshot,expected_stamp=self.disk_stamp,
+                              cards_payload=cards_payload,**data)
         self.saver.progress.connect(self.save_progress.setValue)
-        self.saver.progress.connect(status_progress.setValue)
+        if self._save_status is not None:
+            self.saver.progress.connect(status_progress.setValue)
         self.saver.baseline_ready.connect(self.use_save_baseline)
         self.saver.ready.connect(self.saved_native)
-        self.saver.failed.connect(lambda message:QMessageBox.warning(self,'保存失败，编辑内容仍保留',message))
+        if silent:
+            self.saver.failed.connect(lambda message:diagnostic_exception(
+                'auto save question cards',RuntimeError(message)))
+        else:
+            self.saver.failed.connect(lambda message:QMessageBox.warning(self,'保存失败，编辑内容仍保留',message))
         self.saver.finished.connect(self.save_finished)
         self.save_progress.canceled.connect(self.saver.stop.set)
-        cancel_save.clicked.connect(self.saver.stop.set)
+        if self._save_status is not None:
+            cancel_save.clicked.connect(self.saver.stop.set)
         self.open_action.setEnabled(False)
-        self.statusBar().showMessage('正在后台保存，可继续编辑…')
+        if not silent:self.statusBar().showMessage('正在后台保存，可继续编辑…')
         refresh_menu_state(self)
         self.saver.start()
 
@@ -1045,9 +1293,11 @@ class Viewer(QMainWindow):
         if remember:remember()
         previous_path=self.prepared.path
         self.prepared.path=path
-        baseline=str(self.save_session.baseline)
+        baseline=(str(self.save_session.baseline) if self.save_session
+                  else str(getattr(self.prepared,'archive_path','')))
         self.prepared.archive_path=baseline;self.canvas.archive_path=baseline
         self.disk_bundle=bundle;self.disk_stamp=self.saver.committed_stamp
+        self._cards_dirty=False
         snapshot=self.saver.snapshot
         core=getattr(self.canvas.edits,'core',self.canvas.edits)
         core.saved_token=snapshot.token
@@ -1065,7 +1315,9 @@ class Viewer(QMainWindow):
         # The private session baseline supplies assets removed from the NTB.
         is_recovery=(Path(previous_path).resolve()!=Path(path).resolve()
                      and Path(path).stem.startswith(Path(previous_path).stem+'-保存恢复'))
-        if is_recovery or getattr(self,'_save_request_show_path',False):
+        if getattr(self,'_save_silent',False):
+            self.statusBar().showMessage('题目卡已自动保存',2500)
+        elif is_recovery or getattr(self,'_save_request_show_path',False):
             self.statusBar().showMessage('已保存并检查页面素材：'+path)
         else:
             self.statusBar().showMessage('已保存 · 仍有新修改待保存' if self._has_unsaved_changes() else '已保存并检查页面素材')
@@ -1079,12 +1331,15 @@ class Viewer(QMainWindow):
     def save_finished(self):
         success=self.saver.succeeded
         self.save_progress.close();self.save_progress.deleteLater();self.saver.deleteLater();self.saver=None
-        self.statusBar().removeWidget(self._save_status);self._save_status.deleteLater()
+        if self._save_status is not None:
+            self.statusBar().removeWidget(self._save_status);self._save_status.deleteLater()
+            self._save_status=None
         self.edit_toolbar.setEnabled(True);self.open_action.setEnabled(True);self.canvas.setEnabled(True);self.canvas.setUpdatesEnabled(True)
         after=self.after_save;self.after_save=None
         notice=self._save_notice if success else None
         self._save_notice=None
         self._save_request_show_path=False
+        self._save_silent=False
         refresh_menu_state(self)
         if notice:
             path,is_recovery,detail,show_path=notice
@@ -1098,9 +1353,13 @@ class Viewer(QMainWindow):
         if not success:self.statusBar().showMessage('保存未完成，编辑内容仍保留',6000)
         queued=self._save_queued
         self._save_queued=False
-        if success and queued and self._has_unsaved_changes():
+        if success and queued and (self._has_unsaved_changes() or self._cards_dirty):
             QTimer.singleShot(0,lambda:self.save_ntb(after=after))
             return
+        # Ink written on a card *during* a save is marked dirty again but the
+        # debounce may have fired while the worker was busy. Re-arm it.
+        if success and self._cards_dirty and getattr(self,'_card_autosave_timer',None) is not None:
+            self._card_autosave_timer.start()
         if success and after:
             # Some continuations create/replace a document directly. Do not
             # run one against edits made AFTER its captured save revision.
@@ -1504,6 +1763,7 @@ class Viewer(QMainWindow):
             old.deleteLater()
         self.close_document()
         self.prepared,self.document,self.canvas = prepared,document,canvas
+        self._load_question_cards()
         apply_selection_preferences(self)
         if self._pending_pdf_draft and self._pending_pdf_draft.matches(prepared.path):
             self._active_pdf_draft=self._pending_pdf_draft
@@ -1582,6 +1842,10 @@ class Viewer(QMainWindow):
         self.page_sidebar.reset();self.go_page(focus+1);self.page_sidebar.sync(focus)
 
     def close_document(self):
+        self._close_question_card_windows()
+        self._question_cards=[]
+        self._question_card_assets={}
+        self._cards_dirty=False
         self._snapshot_timer.stop()
         if self.snapshot_worker:
             self.snapshot_worker.stop.set()
@@ -1791,6 +2055,13 @@ class Viewer(QMainWindow):
             event.ignore()
 
     def closeEvent(self,event):
+        # A debounced card save may still be pending. Commit it BEFORE the
+        # unsaved-changes check, and let the existing "wait for saver" branch
+        # below defer the actual close until the worker is done.
+        if (getattr(self,'_cards_dirty',False) and not self.saver
+                and not getattr(self,'_close_flush_done',False)):
+            self._close_flush_done=True
+            self.flush_card_autosave()
         notice = getattr(self, '_free_notice_dialog', None)
         if notice is not None and not sip.isdeleted(notice):
             if not notice.can_dismiss():
@@ -1833,6 +2104,12 @@ class Viewer(QMainWindow):
         if not getattr(self,'_restart_approved',False) and not self.confirm_leave(self.close, continue_label='关闭'):
             event.ignore()
             return
+        scratch=getattr(self,'_scratch_window',None)
+        if scratch is not None:
+            try:
+                if not sip.isdeleted(scratch):scratch.close()
+            except RuntimeError:pass
+            self._scratch_window=None
         self.close_document()
         if self._pending_pdf_draft:
             self._pending_pdf_draft.cleanup()
@@ -1862,7 +2139,7 @@ def main():
     app = QApplication(sys.argv)
     app.setOrganizationName('NotabilityEditor')
     app.setApplicationName('NotabilityEditor')
-    app.setApplicationVersion('0.7.9-Beta')
+    app.setApplicationVersion(APP_VERSION)
     app.setWindowIcon(QIcon(str(icon_path())))
     app.setStyleSheet(APP_STYLE)
     diagnostic_stage("main window creation")

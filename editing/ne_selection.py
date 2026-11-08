@@ -8,6 +8,50 @@ from editing.ne_smart_selection import InkSelectionIndex
 from editing.ne_ink_scale import (CORNERS,HANDLE_TOLERANCE_PX,opposite_corner,
                                   rect_corners,scale_strokes,scaled_bounds)
 
+# The floating "make a card" action is painted into the canvas, not added as a
+# child widget.  When GPU acceleration is on, a QOpenGLWidget covers the whole
+# scroll viewport and calls canvas.paintVisible() itself; any plain child widget
+# of the canvas sits *behind* that surface and is invisible to the user.
+CARD_BUTTON_TEXT='做成卡片'
+CARD_BUTTON_WIDTH=96
+CARD_BUTTON_HEIGHT=30
+CARD_BUTTON_GAP=8
+
+# A question that already has a card gets a very light blue mark on the PDF
+# page.  Painted in paintVisible() (never as a child widget) so it survives the
+# GPU overlay, and absent from PDF export which paints through paint_content().
+CARD_MARK_FILL=QColor(82,169,255,16)      # roughly 6% blue
+CARD_MARK_LINE=QColor('#a8cbf5')
+
+
+def card_mark_rects(page,cards):
+    """Return [(card_id, QRectF)] in page coordinates for one page."""
+    result=[]
+    for card in cards or []:
+        try:
+            if int(card.get('page',-1))!=page:continue
+            values=card.get('rect')
+            if not isinstance(values,(list,tuple)) or len(values)!=4:continue
+            rect=QRectF(*(float(value) for value in values))
+        except (TypeError,ValueError,AttributeError):
+            continue
+        if rect.width()>0 and rect.height()>0:
+            result.append((card.get('id'),rect))
+    return result
+
+
+def paint_card_marks(painter,target,nw,nh,rects):
+    for _,rect in rects:
+        box=QRectF(target.left()+rect.x()*target.width()/nw,
+                   target.top()+rect.y()*target.height()/nh,
+                   rect.width()*target.width()/nw,
+                   rect.height()*target.height()/nh)
+        painter.fillRect(box,CARD_MARK_FILL)
+        pen=QPen(CARD_MARK_LINE,1);pen.setCosmetic(True)
+        painter.setPen(pen);painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(box)
+
+
 def stroke_touches_rect(stroke,rect,smooth=True):
     """Select entire strokes by their displayed outline, including filled ink."""
     radius=0 if stroke.outline is not None else stroke.width/2
@@ -35,6 +79,11 @@ class SelectionMixin:
         self._selection_preview_timer.timeout.connect(self._updateSelectionPreview)
         self._selection_highlight_cache=None
         self.selection_region=None
+        # The marquee rectangle itself (page coordinates).  The ink-selection
+        # logic only keeps strokes, so printed PDF questions would otherwise
+        # leave no trace of the region the user framed for a question card.
+        self.selection_box_rect=None
+        self._card_button_hover=False
 
     def setSelectionOptions(self,*,mode=None,shape=None,pen=None,highlighter=None):
         self.finishGesture()
@@ -84,7 +133,8 @@ class SelectionMixin:
     def clearSelection(self):
         self._selection_preview_timer.stop();self._selection_highlight_cache=None
         self.selection_drag=None;self.selection_page=None;self.selected_indices=set()
-        self.selection_region=None
+        self.selection_region=None;self.selection_box_rect=None
+        self._hideCardButton()
         self.selectionChanged.emit(0);self.update()
 
     def selectionBounds(self):
@@ -130,6 +180,7 @@ class SelectionMixin:
 
     def beginSelection(self,position,modifiers=Qt.KeyboardModifier.NoModifier):
         if self.edit_tool=='image':return False
+        self._hideCardButton()
         additive=bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         subtract=bool(modifiers & Qt.KeyboardModifier.AltModifier)
         handle=None if (additive or subtract) else self.hitSelectionResizeHandle(position)
@@ -276,6 +327,7 @@ class SelectionMixin:
         if not drag:return
         self.selection_drag=None;page=drag['page']
         if drag['kind']=='move':
+            self.selection_box_rect=None
             target=drag.get('target',page)
             if target!=page:
                 self._transferSelectedInk(target,drag['dx'],drag['dy'])
@@ -283,6 +335,7 @@ class SelectionMixin:
                 if self.selection_region is not None:self.selection_region.translate(drag['dx'],drag['dy'])
                 self.editsChanged.emit()
         elif drag['kind']=='scale':
+            self.selection_box_rect=None
             factor=drag.get('factor',1.0);anchor=drag.get('anchor')
             if anchor is not None and self.edits.scale_selection(
                     page,self.selected_indices,anchor,factor):
@@ -295,11 +348,126 @@ class SelectionMixin:
         else:
             self.selected_indices=self._querySelection(drag,final=True)
             region,clicked=self._selectionRegion(drag)
-            self.selection_region=None
+            self.selection_region=None;self.selection_box_rect=None
             if drag['shape']=='lasso' and not clicked and self.selected_indices:
                 base=drag.get('base_region')
                 self.selection_region=(base.subtracted(region) if drag.get('subtract') else base.united(region)) if base is not None else region
+            if not clicked:
+                box=(QRectF(QPointF(*drag['start']),QPointF(*drag['last'])).normalized()
+                     if drag['shape']=='rectangle' else region.boundingRect())
+                nw,nh=self.editPageSize(page)
+                box=box.intersected(QRectF(0,0,nw,nh))
+                w,h=self.draw_sizes[page]
+                if box.width()*w/nw>=24 and box.height()*h/nh>=16:
+                    self.selection_box_rect=box
         self.selectionChanged.emit(len(self.selected_indices));self.update()
+        self._updateCardButton()
+
+    # ------------------------------------------------------------ question card
+    def _hideCardButton(self):
+        self._card_button_hover=False
+
+    def _updateCardButton(self):
+        # Kept as the hook used by finishSelection/setEditTool/setZoom.  The
+        # action is painted from live state, so a repaint is all that is needed.
+        self.update()
+
+    def _cardScreenRect(self):
+        rect=self.selection_box_rect
+        if rect is None or self.selection_page is None:return None
+        page=self.selection_page
+        w,h=self.draw_sizes[page];nw,nh=self.editPageSize(page)
+        left=(self.width()-w)/2
+        top=self.tops[page] if hasattr(self,'tops') else self.pageTop(page)
+        return QRectF(left+rect.x()*w/nw,top+rect.y()*h/nh,
+                      rect.width()*w/nw,rect.height()*h/nh)
+
+    def cardButtonVisible(self):
+        """A framed question with no active gesture shows the floating action."""
+        return bool(self.edit_tool=='select' and getattr(self,'show_ink',True)
+                    and self.selection_page is not None
+                    and self.selection_box_rect is not None
+                    and self.selection_drag is None)
+
+    def cardButtonRect(self):
+        """Action rectangle in canvas coordinates; scrolls with the question."""
+        if not self.cardButtonVisible():return None
+        box=self._cardScreenRect()
+        if box is None:return None
+        width,height=CARD_BUTTON_WIDTH,CARD_BUTTON_HEIGHT
+        x=box.right()+CARD_BUTTON_GAP;y=box.bottom()+CARD_BUTTON_GAP
+        # Never depend on the current scroll offset: a deterministic position
+        # keeps the CPU backing store free of ghosting while scrolling.
+        if x+width>self.width()-6:x=box.right()-width-CARD_BUTTON_GAP
+        if y+height>self.height()-6:y=box.bottom()-height-CARD_BUTTON_GAP
+        x=max(6.,min(float(x),max(6.,self.width()-width-6.)))
+        y=max(6.,min(float(y),max(6.,self.height()-height-6.)))
+        return QRectF(x,y,width,height)
+
+    def hitCardButton(self,position):
+        rect=self.cardButtonRect()
+        return rect is not None and position is not None and rect.contains(QPointF(position))
+
+    def paintCardButton(self,painter):
+        rect=self.cardButtonRect()
+        if rect is None:return
+        hovered=bool(getattr(self,'_card_button_hover',False))
+        painter.save()
+        painter.setRenderHint(painter.RenderHint.Antialiasing,True)
+        painter.setPen(QPen(QColor('#1d4ed8' if hovered else '#5486db'),1.4))
+        painter.setBrush(QColor('#dbe8ff' if hovered else '#ffffff'))
+        painter.drawRoundedRect(rect,6,6)
+        painter.setPen(QColor('#1d4ed8'))
+        painter.drawText(rect,Qt.AlignmentFlag.AlignCenter,CARD_BUTTON_TEXT)
+        painter.restore()
+
+    def _createQuestionCardFromSelection(self):
+        rect=self.selection_box_rect
+        page=self.selection_page
+        if rect is None or page is None:return
+        owner=self.window()
+        create=getattr(owner,'create_question_card',None)
+        if create is None:return
+        create(page,QRectF(rect))
+        self.clearSelection()
+
+    # ------------------------------------------------------ card page marks
+    def cardMarks(self,page):
+        owner=self.window()
+        return card_mark_rects(page,getattr(owner,'_question_cards',None))
+
+    def paintCardMarks(self,painter,page,target):
+        rects=self.cardMarks(page)
+        if not rects:return
+        nw,nh=self.editPageSize(page)
+        painter.save()
+        try:
+            painter.setClipRect(target)
+            paint_card_marks(painter,target,nw,nh,rects)
+        finally:
+            painter.restore()
+
+    def cardAt(self,position):
+        """Card id under a canvas-space point, or None."""
+        hit=self.pointOnPage(QPointF(position))
+        if hit is None:return None
+        page,point=hit
+        probe=QPointF(point[0],point[1]) if isinstance(point,(tuple,list)) else QPointF(point)
+        for card_id,rect in self.cardMarks(page):
+            if rect.contains(probe):return card_id
+        return None
+
+    def tryOpenCardAt(self,position,modifiers=None):
+        """Ctrl+click inside a marked question reopens that card."""
+        if modifiers is not None and not (modifiers & Qt.KeyboardModifier.ControlModifier):
+            return False
+        if not hasattr(self,'cardAt'):return False
+        card_id=self.cardAt(position)
+        if not card_id:return False
+        opener=getattr(self.window(),'open_question_card',None)
+        if opener is None:return False
+        opener(card_id)
+        return True
 
     def selectAllInk(self):
         if self.edit_tool!='select' or not self.show_ink:return
@@ -366,6 +534,7 @@ class SelectionMixin:
         drag=self.selection_drag
         display_page=drag.get('target',self.selection_page) if drag and drag['kind']=='move' else self.selection_page
         if self.edit_tool!='select' or not self.show_ink or display_page!=page:return
+        framed_only=False
         if drag and drag['kind']=='box':
             region,clicked=self._selectionRegion(drag);rect=region.boundingRect()
             if drag['shape']=='lasso' and not clicked:
@@ -376,8 +545,13 @@ class SelectionMixin:
         else:
             polygon=None
             rect=self.selectionBounds()
+            # A marquee around printed PDF text selects no ink.  Keep drawing
+            # the framed region so the user can still see what will become a
+            # card, and so the floating action has a visible anchor.
+            framed_only=rect is None and self.selection_box_rect is not None
+            if framed_only:rect=self.selection_box_rect
             if rect is None:return
-            rect=rect.adjusted(-3,-3,3,3)
+            if not framed_only:rect=rect.adjusted(-3,-3,3,3)
             if drag and drag['kind']=='move':rect.translate(drag['dx'],drag['dy'])
             elif drag and drag['kind']=='scale':
                 rect=QRectF(*drag['preview']).adjusted(-3,-3,3,3)
@@ -413,7 +587,7 @@ class SelectionMixin:
             painter.setBrush(QColor(82,169,255,70) if closed else QColor('white'))
             painter.drawEllipse(polygon[0],5 if closed else 3,5 if closed else 3)
         else:painter.drawRect(box)
-        if not drag or drag['kind'] in ('move','scale'):
+        if (not drag or drag['kind'] in ('move','scale')) and not framed_only:
             if self.selection_region is not None and not (drag and drag['kind']=='scale'):
                 transform=QTransform();transform.translate(target.left(),target.top());transform.scale(target.width()/nw,target.height()/nh)
                 if drag:transform.translate(drag['dx'],drag['dy'])

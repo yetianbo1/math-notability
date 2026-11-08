@@ -12,6 +12,7 @@ from PyQt6.QtCore import QSize, QSizeF, QRectF, QMarginsF, Qt
 from PyQt6.QtGui import QPdfWriter, QPainter, QPageSize, QPageLayout
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtSvg import QSvgRenderer
+from core.ne_app_version import APP_VERSION
 
 
 class ExportCancelled(Exception):
@@ -64,7 +65,7 @@ def write_pdf(canvas,prepared,target,progress=lambda current,total:None,cancelle
         writer=QPdfWriter(str(temp))
         writer.setResolution(144)
         writer.setTitle(Path(prepared.path).stem)
-        writer.setCreator('NotabilityEditor 0.7.9-Beta')
+        writer.setCreator('NotabilityEditor ' + APP_VERSION)
         writer.setPageMargins(QMarginsF(0,0,0,0),QPageLayout.Unit.Point)
         def page_size(w,h):
             # ExactMatch avoids snapping close sizes to a standard paper format.

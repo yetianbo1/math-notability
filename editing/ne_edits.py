@@ -372,6 +372,7 @@ class EditModel:
             stroke=Stroke(tuple(map(tuple,op['points'])),op['color'],op['width'],
                           op.get('opacity',1.0),tool=op.get('tool','pen'),
                           geometry_is_smoothed=bool(op.get('capture_smoothing')),
+                          geometry_is_linear=bool(op.get('geometry_is_linear')),
                           outline=op.get('outline'),tape_pattern=op.get('tape_pattern',3),
                           smart_interpolation=bool(op.get('smart_interpolation')))
             return (state[0]+[stroke],set(state[1]))
@@ -417,6 +418,32 @@ class EditModel:
         if not indices:return False
         op=dict(kind='scale',page=page,indices=indices,anchor=(ax,ay),factor=factor)
         result=self.apply(state,op)
+        del self.history[self.cursor:]
+        self.next_token+=1;self.history.append((self.next_token,op));self.cursor+=1
+        self.cache[page]=result;self.cache.move_to_end(page)
+        while len(self.cache)>8:self.cache.popitem(last=False)
+        return True
+
+    def add_shape(self,page,points,color,width):
+        """One shape drag is one undo entry, stored as linear (unsmoothed) ink.
+
+        Reusing the regular 'draw' op keeps history indexing, recovery logs and
+        NTB write-back on their well-tested path; geometry_is_linear stops the
+        handwritten-ink smoother from rounding the corners of a rectangle.
+        """
+        self.finish()
+        points=tuple(tuple(map(float,p)) for p in points)
+        if len(points)<2 or not all(len(p)==2 and all(math.isfinite(v) for v in p) for p in points):
+            raise ValueError('图形点序列无效')
+        try:
+            width=float(width)
+        except (TypeError,ValueError):
+            raise ValueError('图形笔宽无效')
+        if not isinstance(color,str) or not color or not math.isfinite(width) or width<=0:
+            raise ValueError('图形样式无效')
+        op=dict(kind='draw',page=page,points=points,color=color,width=width,
+                opacity=1.0,tool='pen',mode='partial',geometry_is_linear=True)
+        result=self.apply(self.state(page),op)
         del self.history[self.cursor:]
         self.next_token+=1;self.history.append((self.next_token,op));self.cursor+=1
         self.cache[page]=result;self.cache.move_to_end(page)

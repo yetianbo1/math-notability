@@ -2,12 +2,13 @@
 from pathlib import Path
 import math
 from PyQt6.QtCore import Qt,QSize,QByteArray,QPointF
-from PyQt6.QtGui import QActionGroup,QColor,QIcon,QPainter,QPen,QPixmap
+from PyQt6.QtGui import QAction,QActionGroup,QColor,QIcon,QPainter,QPen,QPixmap
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import (QFrame,QWidget,QHBoxLayout,QVBoxLayout,QToolButton,QMenu,
+from PyQt6.QtWidgets import (QFrame,QWidget,QHBoxLayout,QVBoxLayout,QBoxLayout,QToolButton,QMenu,
                              QLabel,QDoubleSpinBox,QSpinBox,QComboBox,QStackedWidget,QSizePolicy,QAbstractSpinBox,QLayout)
 from ui.ne_style import style_menu
 from editing.ne_edits import COLORS,HIGHLIGHT_COLORS
+from editing.ne_shapes import KINDS,LABELS
 from ui.ne_colors import ColorPalette
 
 ICONS={
@@ -23,6 +24,11 @@ ICONS={
  'layer_back':'<path d="M3 20h18M12 5v11m-5-5 5 5 5-5M5 2h14"/>',
  'erase':'<path d="m3 14 10-11a2 2 0 0 1 3 0l5 5a2 2 0 0 1 0 3L11 21H8l-5-4a2 2 0 0 1 0-3ZM8 9l9 8M11 21h10"/>',
  'select':'<rect x="4" y="4" width="16" height="16" rx="1" stroke-dasharray="3 3"/><path d="M2 6V2h4M18 2h4v4M22 18v4h-4M6 22H2v-4"/>',
+ 'shape':'<rect x="3" y="3" width="10" height="10" rx="1"/><circle cx="15" cy="15" r="6"/><path d="M3 21h7"/>',
+ 'shape_line':'<path d="M4 20 20 4"/><circle cx="4" cy="20" r="1.5"/><circle cx="20" cy="4" r="1.5"/>',
+ 'shape_circle':'<circle cx="12" cy="12" r="8"/>',
+ 'shape_triangle':'<path d="M12 4 21 20H3Z"/>',
+ 'shape_rectangle':'<rect x="3" y="6" width="18" height="12" rx="1"/>',
  'read':'<path d="M8 12V5a2 2 0 0 1 4 0v7-8a2 2 0 0 1 4 0v8-6a2 2 0 0 1 4 0v9c0 5-3 7-7 7-3 0-5-2-7-5l-3-4a2 2 0 0 1 3-3l2 2Z"/>',
  'undo':'<path d="m9 5-6 5 6 5M4 10h11a6 6 0 0 1 0 12" transform="translate(0 -2)"/>',
  'redo':'<path d="m15 5 6 5-6 5M20 10H9a6 6 0 0 0 0 12" transform="translate(0 -2)"/>',
@@ -104,7 +110,7 @@ class FavoriteSwatches(QWidget):
         self.rebuild()
 
     def sizeHint(self):
-        return QSize(max(0,min(len(self.palette.colors),8)*40-8),34)
+        return QSize(max(0,min(len(self.palette.colors),8))*40-8,34)
 
     def minimumSizeHint(self):
         return QSize(0,34)
@@ -122,6 +128,7 @@ class FavoriteSwatches(QWidget):
             button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             button.customContextMenuRequested.connect(lambda point,b=button,c=color:self.delete_menu(b,c,point))
             self.buttons.append(button);self.row.addWidget(button)
+        self.setMinimumSize(0,34);self.setMaximumSize(16777215,34)
         self.setMaximumWidth(self.sizeHint().width())
         self.setVisible(bool(self.buttons))
         self.updateGeometry()
@@ -324,8 +331,9 @@ class EditorPanel(QFrame):
         ''')
         layout=QVBoxLayout(self);layout.setContentsMargins(18,8,18,10);layout.setSpacing(8)
         top=QHBoxLayout();top.setSpacing(6);layout.addLayout(top)
+        self._outer=layout;self._top_row=top
         group=QActionGroup(self);group.setExclusive(True);owner.tools={}
-        for tool,label,key in [('draw','画笔','B'),('highlight','荧光笔','H'),('tape','遮字胶带','T'),('erase','橡皮擦','E'),('select','选择','S'),('image','图片','I'),('read','阅读','V')]:
+        for tool,label,key in [('draw','画笔','B'),('shape','图形','G'),('highlight','荧光笔','H'),('tape','遮字胶带','T'),('erase','橡皮擦','E'),('select','选择','S'),('image','图片','I'),('read','阅读','V')]:
             action=owner.action(self,label,lambda checked=False,t=tool:owner.select_tool(t),key)
             action.setCheckable(True);action.setToolTip(f'{label}（{key}）');action.setIcon(tool_icon(tool));group.addAction(action);owner.tools[tool]=action
             self.tool_button(top,action)
@@ -356,9 +364,11 @@ class EditorPanel(QFrame):
         owner.undo_action.setEnabled(False);owner.redo_action.setEnabled(False)
         self.settings=QStackedWidget();self.settings.setFixedHeight(46);layout.addWidget(self.settings)
         self.pages={}
-        for tool in ('draw','highlight','tape','erase','select','image','read'):
+        for tool in ('draw','shape','highlight','tape','erase','select','image','read'):
             page=QWidget();page.setObjectName('toolSettings');row=QHBoxLayout(page);row.setContentsMargins(12,5,12,5);row.setSpacing(8)
             self.pages[tool]=(page,row);self.settings.addWidget(page)
+        kind=str(owner.color_settings.value('shape/kind','line'))
+        owner.shape_kind=kind if kind in KINDS else 'line'
         row=self.pages['draw'][1];colors=QActionGroup(self);colors.setExclusive(True)
         owner.color_actions={}
         owner.custom_pen_color=restore_color(owner.color_settings.value('draw/custom_color',COLORS['红']),COLORS['红'])
@@ -387,7 +397,50 @@ class EditorPanel(QFrame):
             button=WidthButton(value);button.clicked.connect(lambda checked=False,v=value:owner.pen_size.setValue(v));self.width_buttons.append(button);row.addWidget(button)
         owner.pen_size=QDoubleSpinBox();owner.pen_size.setDecimals(1);owner.pen_size.setRange(.1,128);owner.pen_size.setSingleStep(.1);owner.pen_size.setValue(restore_number(owner.color_settings.value('draw/width',2),2,.1,128));owner.pen_size.setFixedWidth(72)
         owner.pen_size.setAccessibleName('画笔宽度');owner.pen_size.setToolTip('笔宽 0.1～128；将鼠标移到页面即可按实际比例预览笔尖大小');row.addWidget(owner.pen_size);row.addStretch()
-        owner.pen_size.valueChanged.connect(owner.update_edit_settings);owner.pen_size.valueChanged.connect(self.sync_width);self.sync_width(owner.pen_size.value())
+        owner.pen_size.valueChanged.connect(owner.update_edit_settings);owner.pen_size.valueChanged.connect(self.sync_width)
+        # One extra tool button opens a shape strip; color and width stay the
+        # pen's settings, so no second palette or width state is introduced.
+        row=self.pages['shape'][1]
+        shape_group=QActionGroup(self);shape_group.setExclusive(True)
+        self.shape_actions={}
+        for kind in KINDS:
+            action=owner.action(self,LABELS[kind],lambda checked=False,k=kind:owner.select_shape(k),None)
+            action.setCheckable(True);action.setIcon(tool_icon('shape_'+kind))
+            action.setToolTip(f'{LABELS[kind]}：拖动绘制')
+            shape_group.addAction(action);self.shape_actions[kind]=action
+            button=QToolButton();button.setDefaultAction(action)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setIconSize(QSize(17,17));button.setFixedSize(72,34);row.addWidget(button)
+        self.separator(row);row.addWidget(QLabel('颜色'))
+        color_group=QActionGroup(self);color_group.setExclusive(True)
+        self.shape_color_actions={}
+        for name,color in COLORS.items():
+            action=QAction(name,self);action.setCheckable(True)
+            action.triggered.connect(lambda checked=False,c=color:owner.select_color(c,switch_tool=False))
+            color_group.addAction(action);self.shape_color_actions[color]=action
+            chip=QToolButton();chip.setDefaultAction(action);chip.setFixedSize(26,26)
+            chip.setToolTip(name);chip.setAccessibleName('图形颜色 '+name)
+            chip.setStyleSheet(f'QToolButton {{background:{color};border:2px solid #d1d5db;border-radius:13px;}}'
+                               'QToolButton:checked {border:3px solid #1d4ed8;}'
+                               'QToolButton:hover {border-color:#93c5fd;}')
+            row.addWidget(chip)
+        self.shape_custom_action=QAction('自定义',self)
+        self.shape_custom_action.setCheckable(True)
+        self.shape_custom_action.triggered.connect(
+            lambda checked=False:owner.choose_custom_color('draw',switch_tool=False))
+        color_group.addAction(self.shape_custom_action)
+        custom=QToolButton();custom.setDefaultAction(self.shape_custom_action)
+        custom.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        custom.setFixedHeight(30);custom.setToolTip('自定义图形颜色（与画笔共用）');row.addWidget(custom)
+        self.separator(row);row.addWidget(QLabel('笔宽'))
+        for value in (1.,2.,4.):
+            button=WidthButton(value)
+            button.clicked.connect(lambda checked=False,v=value:owner.pen_size.setValue(v))
+            self.width_buttons.append(button);row.addWidget(button)
+        row.addStretch();row.addWidget(QLabel('拖动画出 · Shift 正形 · 颜色笔宽随画笔'))
+        self.sync_shape(owner.shape_kind)
+        self.sync_shape_colors(owner.current_color,custom=owner.pen_color_is_custom)
+        self.sync_width(owner.pen_size.value())
         row=self.pages['highlight'][1]
         highlight_group=QActionGroup(self);highlight_group.setExclusive(True)
         owner.highlight_color_actions={}
@@ -460,7 +513,8 @@ class EditorPanel(QFrame):
         button.setIconSize(QSize(20,20));button.setFixedSize(94 if action.text()=='遮字胶带' else 70,38);row.addWidget(button);return button
 
     def separator(self,row):
-        line=QFrame();line.setFixedSize(1,22);line.setStyleSheet('background:#e2e8f0;border:0;');row.addWidget(line)
+        line=QFrame();line.setObjectName('rowSeparator');line.setFixedSize(1,22)
+        line.setStyleSheet('background:#e2e8f0;border:0;');row.addWidget(line)
 
     def bind_selection_actions(self,owner):
         """Share the shape actions with Tools > Selection, as a two-button strip."""
@@ -499,6 +553,14 @@ class EditorPanel(QFrame):
         row.addStretch()
 
     def set_tool(self,tool):self.settings.setCurrentWidget(self.pages[tool][0])
+    def sync_shape(self,kind):
+        action=self.shape_actions.get(kind)
+        if action is not None:action.setChecked(True)
+    def sync_shape_colors(self,color,custom=False):
+        action=self.shape_custom_action if custom else self.shape_color_actions.get(color)
+        if action is not None:action.setChecked(True)
+        else:
+            for item in self.shape_color_actions.values():item.setChecked(False)
     def sync_width(self,value):
         for button in self.width_buttons:button.setChecked(abs(button.value-value)<.001)
     def selection_changed(self,count):

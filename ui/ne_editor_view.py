@@ -3,6 +3,22 @@ from PyQt6.QtCore import QObject, QEvent, QPoint, QPointF, Qt, QTimer
 from PyQt6.QtGui import QAction, QCursor
 from PyQt6.QtWidgets import QApplication, QToolBar, QLabel
 
+# One physical wheel notch is 120 eighths of a degree in Qt. A notch maps to
+# one 20% zoom step; fractional deltas (smooth trackpads) interpolate on the
+# same scale so the two input devices feel consistent.
+WHEEL_ZOOM_STEP = 1.2
+WHEEL_UNIT = 120.0
+
+
+def wheel_zoom_factor(event):
+    """Zoom multiplier for a wheel event, or 1.0 when there is nothing to do."""
+    delta = event.angleDelta().y()
+    if not delta:
+        delta = event.pixelDelta().y()
+    if not delta:
+        return 1.0
+    return WHEEL_ZOOM_STEP ** (delta / WHEEL_UNIT)
+
 
 class EditorView(QObject):
     def __init__(self, owner):
@@ -45,6 +61,33 @@ class EditorView(QObject):
     def update_page(self, *args):
         o = self.owner
         self.page_label.setText(f" {o.page.value()} / {getattr(o.canvas, 'page_count', 1) if o.canvas else 0} ")
+
+    def zoom_at_pointer(self, global_pos, factor):
+        """Apply a zoom step while keeping the page point under the cursor put.
+
+        ``apply_zoom`` keeps the *reading position* (current page + fraction).
+        On top of that we compensate the scroll bars so the exact spot the user
+        pointed at stays under the pointer, like a PDF reader or a browser.
+        """
+        o = self.owner
+        c = o.canvas
+        viewport = o.scroll.viewport()
+        before = c.mapFromGlobal(global_pos)
+        pointer = viewport.mapFromGlobal(global_pos)
+        old_zoom = o.zoom
+        o.change_zoom(factor)
+        ratio = o.zoom / old_zoom
+        if ratio == 1.0:
+            return
+        after = QPoint(round(before.x() * ratio), round(before.y() * ratio))
+        moved = c.mapTo(viewport, after)
+        delta = moved - pointer
+        if delta.x():
+            bar = o.scroll.horizontalScrollBar()
+            bar.setValue(bar.value() + delta.x())
+        if delta.y():
+            bar = o.scroll.verticalScrollBar()
+            bar.setValue(bar.value() + delta.y())
 
     def busy_gesture(self):
         c = self.owner.canvas
@@ -171,6 +214,18 @@ class EditorView(QObject):
         c = o.canvas
         if c is None:return False
         viewport = o.scroll.viewport()
+        # Ctrl+wheel zooms the note instead of scrolling it. Consume the event
+        # ourselves so QScrollArea never performs its default wheel scroll;
+        # plain wheel events fall through untouched. Only the note viewport is
+        # claimed, so spinning a QSpinBox in the toolbar keeps working.
+        if (t == QEvent.Type.Wheel and obj in (c, viewport, o.scroll)
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            if not self.busy_gesture():
+                factor = wheel_zoom_factor(event)
+                if factor != 1.0:
+                    self.zoom_at_pointer(event.globalPosition().toPoint(), factor)
+            event.accept()
+            return True
         if obj in (c, viewport):
             if t in (QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show):
                 self.schedule_cursor_refresh()
@@ -207,6 +262,10 @@ class EditorView(QObject):
         if obj not in (c, viewport):return False
         if not start:return False
         if mouse and event.button() != Qt.MouseButton.LeftButton:return False
+        # A painted "make a card" action can sit in the grey margin; let the
+        # canvas handle that press instead of starting an outside-paper pan.
+        if hasattr(c,'hitCardButton') and c.hitCardButton(QPointF(c.mapFromGlobal(point.toPoint()))):
+            return False
         if not self.outside_paper(point):return False
         if self.busy_gesture():return False
         if hasattr(c, '_cancelReadingPan'):c._cancelReadingPan()

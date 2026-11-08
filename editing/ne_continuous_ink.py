@@ -44,7 +44,7 @@ class ContinuousInkMixin:
             self._continuous_erase_radius=max(self.eraser_width*max(dw/self.editPageSize(i)[0],dh/self.editPageSize(i)[1])/2
                                               for i,(dw,dh) in enumerate(self.draw_sizes))
             self._eraseContinuousSegment(position,position)
-            self._drag_scroll_timer.start()
+            self._startDragScrollTimer()
             return
         self.edits.begin_compound()
         self._continuous_draw=QPointF(position)

@@ -8,6 +8,7 @@ from ui.ne_style import MENU_STYLE,MENUBAR_STYLE,style_menu
 from ui.ne_ui import add_dialog_header,add_dialog_hint,add_dialog_divider
 from ui.ne_shortcuts import show_shortcuts
 from ui.ne_toolbar import tool_icon
+from core.ne_app_version import APP_VERSION
 from images.ne_image_toolbar_state import action_states
 
 
@@ -63,6 +64,7 @@ def build_menus(owner):
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         button.setFixedHeight(34);row.addWidget(button)
 
+    owner.menus['工具'].addAction(owner.tools['shape'])
     owner.menus['工具'].addAction(owner.tools['tape'])
     owner.menus['工具'].addAction(owner.tape_reveal_action)
     owner.menus['工具'].addSeparator()
@@ -175,6 +177,14 @@ def build_menus(owner):
     owner.insert_image_action.setIcon(tool_icon('image'))
     owner.insert_image_action.setToolTip('插入图片（Ctrl+Shift+I）；默认在背景上一层，选中后拖动四角控制点缩放')
     owner.editor_panel.bind_image_actions(owner)
+    tools.addSeparator()
+    owner.scratch_action=owner.action(tools,'草稿纸',owner.open_scratch_pad)
+    owner.scratch_action.setToolTip('打开一次性草稿纸：手写演算，可贴到当前页；关闭即丢弃')
+    cards=tools.addMenu('题目卡')
+    owner.question_cards_menu=cards
+    cards.setToolTip('重新打开随笔记保存的题目卡；用「选择」框住题目后点「做成卡片」新建')
+    cards.aboutToShow.connect(owner.refresh_question_cards_menu)
+    owner.refresh_question_cards_menu()
     owner.defaults_action=owner.action(tools,'默认打开程序…',owner.show_default_settings)
     settings.addAction(owner.defaults_action)
 
@@ -388,7 +398,7 @@ def show_about(owner):
     layout=QVBoxLayout(dialog)
     layout.setContentsMargins(26,24,26,22)
     layout.setSpacing(16)
-    add_dialog_header(layout,'NotabilityEditor','版本 0.7.9-Beta · Windows 本地笔记查看与编辑')
+    add_dialog_header(layout,'NotabilityEditor','版本 ' + APP_VERSION + ' · Windows 本地笔记查看与编辑')
     add_dialog_divider(layout)
     info=QLabel('打开文件支持 NTB、NOTE；导入功能目前只支持 PDF，并创建可编辑的 NTB。\nNTB 支持画笔、荧光笔、页面管理及批量删除。\n'
                 '可导出带底图和笔迹的 PDF，也可导出 NOTE。')
@@ -446,7 +456,7 @@ def show_help(owner):
             ('撤销', '批量删除作为一次编辑操作，Ctrl+Z 可整批恢复；至少保留一页'),
         ]),
         ('视图',[
-            ('缩放', 'Ctrl+= 放大 · Ctrl+- 缩小 · Ctrl+0 适应页面宽度'),
+            ('缩放', 'Ctrl+鼠标滚轮 以光标为中心缩放 · Ctrl+= 放大 · Ctrl+- 缩小 · Ctrl+0 适应页面宽度；不按 Ctrl 时滚轮照常翻页'),
             ('翻页', 'Alt+Left / Alt+Right · Ctrl+L 输入页码，再按 Enter 跳转'),
             ('图像增强', '在「视图 → 页面增强设置」调节扫描页面柔和度'),
             ('只读限制', 'NOTE 仅可阅读；PDF 通过导入创建 NTB 后才能进行笔迹和页面编辑'),

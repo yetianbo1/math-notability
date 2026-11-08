@@ -16,6 +16,7 @@ SPECS = {
     'undo': ('编辑', '撤销', 'Ctrl+Z', 'global'),
     'redo': ('编辑', '回退', 'Ctrl+Y;Ctrl+Shift+Z', 'global'),
     'draw': ('工具', '画笔', 'B', 'global'),
+    'shape': ('工具', '图形', 'G', 'global'),
     'highlight': ('工具', '荧光笔', 'H', 'global'),
     'erase': ('工具', '橡皮擦', 'E', 'global'),
     'select': ('工具', '选择笔迹', 'S', 'global'),

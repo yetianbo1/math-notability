@@ -11,9 +11,10 @@ from platform_integration.ne_windows import (APP_ID, APP_NAME, APPLICATION_NAME,
                         CAPABILITIES, _query_string, register_application)
 from core.ne_version import ensure_registration_allowed
 from core.ne_identity import LEGACY_DISPLAY_NAMES
+from core.ne_app_version import APP_VERSION
 
 # Release channel: relese. A same-base relese outranks every internal vN.
-VERSION = '0.7.9-Beta'
+VERSION = APP_VERSION
 COMPATIBILITY_REVISION = '2026-10-29'
 UNINSTALL_KEY = r'Software\Microsoft\Windows\CurrentVersion\Uninstall\NotabilityEditor'
 MARKER = 'installation.json'
