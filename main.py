@@ -1351,6 +1351,12 @@ class Viewer(QMainWindow):
                     '\n\n如需排查，可运行项目根目录的 DIAGNOSE_OVERWRITE.bat。',path)
         self.edit_changed()
         if not success:self.statusBar().showMessage('保存未完成，编辑内容仍保留',6000)
+        # A card window was closed while this save was in flight.  Only now do
+        # we know the bytes are on disk, so the "saved" confirmation is honest.
+        if getattr(self,'_card_saved_notice',False):
+            self._card_saved_notice=False
+            saved=bool(success)
+            QTimer.singleShot(0,lambda saved=saved:self._show_card_saved_notice(saved))
         queued=self._save_queued
         self._save_queued=False
         if success and queued and (self._has_unsaved_changes() or self._cards_dirty):
@@ -1367,6 +1373,13 @@ class Viewer(QMainWindow):
                 self.statusBar().showMessage('快照已保存；保存期间有新修改，已留在编辑页。请保存后再继续。')
             else:
                 QTimer.singleShot(0,after)
+
+    def _show_card_saved_notice(self, saved):
+        if saved:
+            QMessageBox.information(self,'题目卡','题目卡已保存')
+        else:
+            QMessageBox.warning(self,'题目卡',
+                                '题目卡保存未完成，笔迹仍保留在编辑中。请按 Ctrl+S 保存笔记。')
 
     def export_to_pdf(self):
         if self.worker or self.saver or not self.prepared:return

@@ -93,7 +93,13 @@ def scene(c,page,include_ink=True,include_text=True,*,static=False,defer_svg=Fal
         owners.update(owner for owner,_ in c.spill_ink.get(source,()) if owner in allowed)
         for owner in owners:
             copied=hasattr(c.edits,'specs') and c.edits.specs[owner].get('source') is None
-            if copied or owner in edited or (owner==source and (active or moving)):
+            # A card sheet owns no native SVG ink layer: every stroke, including
+            # ink restored from a previous session, lives in core.originals().
+            # Without this branch scene() sees no edited page and no c.ink, so a
+            # reopened card paints a blank sheet even though the strokes are
+            # still in the canvas state (and still saved to the .ntb).
+            sheet_ink=getattr(c,'card_sheet',False) and owner==source
+            if copied or owner in edited or sheet_ink or (owner==source and (active or moving)):
                 strokes=core.state(owner)[0]
                 if owner==source:strokes=c.selectedPreview(page,strokes)
                 delta=(owner-source)*c.note_height if not c.local_ink else 0

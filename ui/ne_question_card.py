@@ -15,7 +15,8 @@ import uuid
 
 from PyQt6.QtCore import (Qt, QBuffer, QByteArray, QEvent, QIODevice, QPoint,
                           QRect, QRectF, QSize, QTimer)
-from PyQt6.QtGui import QColor, QGuiApplication, QImage, QPainter
+from PyQt6.QtGui import (QColor, QGuiApplication, QImage, QKeySequence,
+                         QPainter, QShortcut)
 from PyQt6.QtWidgets import (QBoxLayout, QHBoxLayout, QLabel, QMessageBox,
                              QSizePolicy, QToolButton, QVBoxLayout, QWidget)
 from PyQt6 import sip
@@ -84,6 +85,24 @@ def restore_canvas_strokes(canvas, strokes):
     canvas.edits.originals = lambda page: strokes if page == 0 else []
     canvas.original_edit_cache.clear()
     canvas.edits.cache.clear()
+
+
+def show_card_saved_notice(owner, saved=True):
+    """Confirmation after the user actively closes a card window.
+
+    A silent autosave runs on a background worker, so main.py defers this
+    notice until save_finished() reports that the bytes are on disk.
+    """
+    try:
+        parent = owner if isinstance(owner, QWidget) else None
+        if saved:
+            QMessageBox.information(parent, '题目卡', '题目卡已保存')
+        else:
+            QMessageBox.warning(
+                parent, '题目卡',
+                '题目卡笔迹已保留在编辑中，但笔记尚未写入磁盘。请按 Ctrl+S 保存笔记。')
+    except (RuntimeError, AttributeError):
+        pass
 
 
 def make_card(page, number, rect, rendered):
@@ -300,6 +319,11 @@ class QuestionCardWindow(QWidget):
         self._fullscreen = False
         self._saved_geometry = None
         self._hidden_peers = []
+        # Esc is a window-wide shortcut: it works even when a toolbar button,
+        # pen-width spinbox or the canvas currently owns the keyboard focus.
+        self._esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._esc_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._esc_shortcut.activated.connect(self.save_and_exit)
         self._layout_timer = QTimer(self)
         self._layout_timer.setSingleShot(True)
         self._layout_timer.setInterval(40)
@@ -600,19 +624,46 @@ class QuestionCardWindow(QWidget):
         super().showEvent(event)
         QTimer.singleShot(0, self._refresh_layout)
 
+    def save_and_exit(self):
+        """Esc: one press commits the ink and closes the card window."""
+        if self._deleted or not self.isVisible():
+            return
+        self.close()
+
+    def _request_saved_notice(self):
+        """Confirm only once the background writer has really committed.
+
+        If a save is already running, defer the dialog to Viewer.save_finished;
+        otherwise report immediately.  A notebook that cannot be auto-saved
+        (an unsaved PDF/new-note draft, or a grouped-page plan) gets an honest
+        warning instead of a misleading "saved" confirmation.
+        """
+        owner = self.owner
+        if getattr(owner, 'saver', None) is not None:
+            owner._card_saved_notice = True
+            return
+        saved = not getattr(owner, '_cards_dirty', False)
+        show_card_saved_notice(owner, saved=saved)
+
     def closeEvent(self, event):
         try:
             self.canvas.finishGesture()
         except Exception:
             pass
-        # Sync first: while still marked full-screen, card_data() reports the
-        # saved windowed geometry rather than the temporary screen rectangle.
-        if not self._deleted:
+        # Esc / the title-bar close are user actions: commit every stroke and
+        # confirm the write.  Programmatic closes (switching notes, quitting,
+        # deleting a card) set _deleted and stay silent so they never stack
+        # modal dialogs.
+        user_close = not self._deleted
+        if user_close:
+            # Sync first: while still marked full-screen, card_data() reports
+            # the saved windowed geometry, not the temporary screen rectangle.
             self._sync_to_owner()
             self._mark_dirty()
             # A pending debounce may never fire if the app is closing, so
             # commit the last strokes through the normal save pipeline now.
             self._flush_autosave()
+            self._request_saved_notice()
         if self._fullscreen:
             # Do NOT call restore_fullscreen() here: it calls show() on a
             # widget that is in the middle of closing.
@@ -625,10 +676,8 @@ class QuestionCardWindow(QWidget):
         super().closeEvent(event)
 
     def keyPressEvent(self, event):
-        if self._fullscreen and event.key() == Qt.Key.Key_Escape:
-            self.restore_fullscreen()
-            event.accept()
-            return
+        # Esc is now a window-wide QShortcut (save & exit), so do not swallow
+        # it here as the old "restore from fullscreen" shortcut.
         if undo_key(self.canvas, event):
             event.accept()
             # undoEdit() emits editsChanged, so the ink is already synced.
