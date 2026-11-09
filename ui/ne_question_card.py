@@ -288,10 +288,14 @@ class CardCanvas(PdfNoteCanvas):
 
 
 class QuestionCardWindow(QWidget):
-    """One always-on-top card on a single continuous, writable sheet."""
+    """One card on a single continuous, writable sheet.
+
+    Deliberately NOT always-on-top: switching to another application must be
+    able to put that application above the card.
+    """
 
     def __init__(self, owner, card, blob):
-        flags = Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
+        flags = Qt.WindowType.Tool
         super().__init__(None, flags)
         self.owner = owner
         self.card = dict(card)
@@ -496,8 +500,8 @@ class QuestionCardWindow(QWidget):
         self.full_button.setText('还原')
         self._fullscreen = True
         # Deliberately keep the original window flags: changing them on a
-        # visible always-on-top Tool window recreates the native surface and
-        # has been observed to crash on exit.  Geometry alone is enough.
+        # visible Tool window recreates the native surface and has been
+        # observed to crash on exit.  Geometry alone is enough.
         self.setGeometry(geometry)
         self.show()
         self.raise_()

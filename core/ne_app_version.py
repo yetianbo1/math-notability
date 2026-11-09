@@ -6,7 +6,7 @@ generate the Windows VERSIONINFO resource, so nothing else needs editing.
 """
 import re
 
-APP_VERSION = '0.13.0-Beta'
+APP_VERSION = '0.13.1-Beta'
 APP_NAME = 'NotabilityEditor'
 
 # Numeric counterpart used by the Windows VERSIONINFO resource.  The last
@@ -15,6 +15,19 @@ _MATCH = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)(?:-[A-Za-z]+)?', APP_VERSION)
 if _MATCH is None:
     raise ValueError('APP_VERSION must look like 0.10.1-Beta')
 VERSION_NUMBERS = tuple(int(part) for part in _MATCH.groups()) + (65535,)
+
+
+def release_track(version=None):
+    """Major release track = the first numeric field (0 for 0.13.1-Beta).
+
+    Startup notices are keyed to this track: 0.13.0 -> 0.13.1 -> 0.14.0 all
+    belong to track 0, so only a 0.x -> 1.x style change re-prompts.
+    """
+    value = str(version or APP_VERSION).split('-', 1)[0]
+    parts = value.split('.')
+    if len(parts) != 3 or not parts[0].isdigit():
+        raise ValueError('无法识别应用版本号：' + str(version))
+    return int(parts[0])
 
 
 def exe_basename():

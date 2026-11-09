@@ -6,7 +6,8 @@ from PyQt6 import sip
 from PyQt6.QtCore import Qt, QElapsedTimer, QEvent, QSettings, QTimer
 from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout,
                             QLabel, QPushButton)
-from settings.ne_startup_registration import show_startup_registration
+from settings.ne_startup_registration import (show_startup_registration,
+                            track_seen, mark_track_seen)
 from platform_integration.ne_install import VERSION
 from ui.ne_toolbar import tool_icon
 
@@ -140,6 +141,10 @@ class FreeSoftwareNotice(QDialog):
             # Allow use with read-only settings, but retry the notice next time.
             self.settings.remove(self.acknowledged_key)
             self.settings.sync()
+        else:
+            # A patch/minor update inside the same major release must not
+            # resurrect the five-second notice.
+            mark_track_seen(self.settings, LEGACY_ACKNOWLEDGED_KEY)
         self._acknowledged = True
         self._timer.stop()
         super().done(result)
@@ -157,9 +162,9 @@ def show_free_software_notice(owner, *, finished=None):
             finished()
         return None
     settings = owner.color_settings
-    # The old global flag and other versions' confirmations cannot bypass this
-    # version's notice. Keep those records intact for older installations.
-    if settings.value(acknowledgement_key(), False, type=bool):
+    # One acknowledgement per major release.  Exact-version keys written by
+    # older builds are still recognised, so small updates never re-prompt.
+    if track_seen(settings, LEGACY_ACKNOWLEDGED_KEY):
         if finished:
             finished()
         return None

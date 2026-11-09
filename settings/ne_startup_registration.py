@@ -3,7 +3,8 @@ import sys
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                            QPushButton, QCheckBox)
+                            QPushButton)
+from core.ne_app_version import release_track
 from platform_integration.ne_install import VERSION
 from platform_integration.ne_registration import (registered_application,
                             registered_version_order, registration_matches_version)
@@ -23,12 +24,55 @@ DISABLED_KEY = disabled_key()
 SEEN_PREFIX = 'startup/registration_seen/'
 
 
+def track_key(base, version=None):
+    """One acknowledgement per MAJOR release (only 0.x -> 1.x re-prompts)."""
+    return f'{base}/tracks/{release_track(version)}'
+
+
+def track_seen(settings, base, version=None):
+    """True once a notice was shown anywhere in this major release.
+
+    Exact-version keys written by older builds are migrated on first read, so
+    upgrading 0.13.0 -> 0.13.1 never resurrects an acknowledged dialog.
+    """
+    if settings.value(track_key(base, version), False, type=bool):
+        return True
+    track = release_track(version)
+    settings.beginGroup(base + '/versions')
+    try:
+        legacy = [key for key in settings.childKeys()
+                  if str(key).split('.', 1)[0].isdigit()
+                  and int(str(key).split('.', 1)[0]) == track
+                  and settings.value(key, False, type=bool)]
+    finally:
+        settings.endGroup()
+    if legacy:
+        mark_track_seen(settings, base, version)
+        return True
+    return False
+
+
+def mark_track_seen(settings, base, version=None):
+    key = track_key(base, version)
+    if not settings.value(key, False, type=bool):
+        settings.setValue(key, True)
+        settings.sync()
+
+
 def should_prompt(settings, registration, *, version=VERSION):
-    """Only this version's opt-out or a current/newer registration can skip."""
-    if settings.value(disabled_key(version), False, type=bool):
+    """Only a MAJOR release bump can reopen this invitation."""
+    if track_seen(settings, LEGACY_DISABLED_KEY, version):
         return False
     order = registered_version_order(registration, version)
-    return order is None or order < 0
+    if order is None:
+        return True
+    if order >= 0:
+        return False
+    # An older registration within the same major release is still valid.
+    try:
+        return release_track((registration or {}).get('version')) != release_track(version)
+    except (ValueError, TypeError):
+        return True
 
 
 class StartupRegistrationDialog(QDialog):
@@ -85,10 +129,7 @@ class StartupRegistrationDialog(QDialog):
         self.system_button.clicked.connect(self.open_system_settings)
         self.system_button.hide()
         layout.addWidget(self.system_button)
-        self.never_ask = QCheckBox('此版本不再询问')
-        self.never_ask.setToolTip('仅当前版本不再显示；升级后重新检查注册状态。仍可从“设置”菜单手动注册。')
-        layout.addWidget(self.never_ask)
-        hint = QLabel('也可稍后在“设置 → 注册应用到 Windows…”中完成。')
+        hint = QLabel('本大版本内不再提示。也可稍后在“设置 → 注册应用到 Windows…”中完成。')
         hint.setObjectName('registrationSubtitle')
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -123,7 +164,6 @@ class StartupRegistrationDialog(QDialog):
         self.register_button.setEnabled(False)
         self.register_button.setText('正在注册…')
         self.later_button.setEnabled(False)
-        self.never_ask.setEnabled(False)
         self.status.setText('正在安装并更新 Windows 注册，请稍候…')
         self.status.show()
         QTimer.singleShot(0, self.finish_registration)
@@ -145,7 +185,6 @@ class StartupRegistrationDialog(QDialog):
         finally:
             self._busy = False
             self.later_button.setEnabled(True)
-            self.never_ask.setEnabled(True)
 
     def open_system_settings(self):
         try:
@@ -166,10 +205,9 @@ def show_startup_registration(owner, *, finished=None):
         return None
     settings = owner.color_settings
     current_version = VERSION
-    opt_out_key = disabled_key(current_version)
-    # The former global boolean has no version attribution. Preserve it, but
-    # never let it silence a newer release. Only an explicit version key counts.
-    if settings.value(opt_out_key, False, type=bool):
+    # Only a major release bump (0.x -> 1.x) reopens the invitation; patch and
+    # minor updates inside the same track keep the earlier decision.
+    if track_seen(settings, LEGACY_DISABLED_KEY, current_version):
         if finished:
             finished()
         return None
@@ -181,8 +219,10 @@ def show_startup_registration(owner, *, finished=None):
     dialog = StartupRegistrationDialog(owner, registration)
     owner._startup_registration_dialog = dialog
     def closed(_result):
-        settings.setValue(opt_out_key, dialog.never_ask.isChecked())
-        settings.sync()
+        # Showing the invitation once is enough for this whole major release,
+        # whether the user registered, postponed or simply closed it.
+        settings.setValue(disabled_key(current_version), True)
+        mark_track_seen(settings, LEGACY_DISABLED_KEY, current_version)
         owner._startup_registration_dialog = None
         dialog.deleteLater()
         if finished:
@@ -205,5 +245,4 @@ QPushButton:hover { background:#f0f5ff; border-color:#a5c3f5; }
 QPushButton#registerNow { background:#2563eb; color:#ffffff; border-color:#2563eb; }
 QPushButton#registerNow:hover { background:#1d4ed8; }
 QPushButton:disabled { color:#94a3b8; border-color:#e2e8f0; }
-QCheckBox { font-size:13px; spacing:8px; color:#5b708e; }
 '''

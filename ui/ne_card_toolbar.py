@@ -28,6 +28,12 @@ TOOL_LABELS = {'draw': '画笔', 'shape': '图形', 'highlight': '荧光笔',
 
 
 def _colored_chip(row, action, color, name):
+    """A purely graphical colour dot.
+
+    Never use ``setDefaultAction`` here: colour actions carry Chinese colour
+    names, and QToolButton paints an action's text when the action has no
+    icon, squeezing a character into every 24 px swatch.
+    """
     chip = QToolButton()
     chip.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
     chip.setFixedSize(24, 24)
@@ -37,7 +43,10 @@ def _colored_chip(row, action, color, name):
         'QToolButton:checked { border:3px solid #1d4ed8; }'
         'QToolButton:hover { border-color:#93c5fd; }')
     if action is not None:
-        chip.setDefaultAction(action)
+        chip.setCheckable(True)
+        chip.setChecked(action.isChecked())
+        chip.clicked.connect(lambda checked=False, a=action: a.trigger())
+        action.toggled.connect(chip.setChecked)
     else:
         chip.setEnabled(False)
     row.addWidget(chip)

@@ -1015,16 +1015,85 @@ class Viewer(QMainWindow):
             self.canvas.archive_path=path
 
     def offer_recovery(self):
+        """Persist pending crash snapshots silently; startup never asks.
+
+        Every snapshot is written to a NEW ``<note>-恢复.ntb`` file, so the
+        original note is never touched.  Unreadable sessions stay on disk and
+        go to the diagnostic log instead of blocking startup with a dialog.
+        """
         from editing.ne_save_session import scan_recoveries
-        if self.worker or self.prepared:return
-        scan=scan_recoveries()
-        self.show_recovery_issues(scan.issues)
-        if scan.entries:
-            choice=QMessageBox.question(self,'发现未保存的笔记',
-                '上次编辑留下了本地恢复快照。是否恢复为新的 NTB？原文件保持不变。',
-                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes)
-            if choice==QMessageBox.StandardButton.Yes:self.recover_unsaved_note(scan=scan)
+        if self.worker or self.workspace.busy():
+            QTimer.singleShot(250,self.offer_recovery);return
+        try:
+            scan=scan_recoveries()
+        except Exception as exc:
+            diagnostic_exception('scan recovery sessions',exc);return
+        for issue in scan.issues:
+            diagnostic_warning('unreadable recovery session kept: '+
+                               str(issue.folder)+' '+issue.reason)
+        if not scan.entries:return
+        self._recovery_queue=list(scan.entries)
+        QTimer.singleShot(150,self._auto_recover_next)
+
+    def _recovery_copy_name(self,payload):
+        """A fresh, non-overwriting copy in the portable data directory.
+
+        Old snapshots often point at temporary PDF/new-note drafts or at a
+        library folder that has since been moved, so writing next to the
+        original would hide the copy in Temp.  Keep every recovered note in
+        one predictable, portable folder instead.
+        """
+        from core.ne_paths import data_directory
+        folder=data_directory()/'recovered'
+        try:folder.mkdir(parents=True,exist_ok=True)
+        except OSError:folder=data_directory()
+        original=Path(payload['target'])
+        stem=''.join(ch if ch not in '\\/:*?"<>|' else '_'
+                     for ch in (original.stem or '未命名'))[:80].strip() or '未命名'
+        for index in range(1000):
+            suffix='' if index==0 else str(index+1)
+            candidate=folder/f'{stem}-恢复{suffix}.ntb'
+            if not candidate.exists():return candidate
+        return folder/f'{stem}-恢复-{os.urandom(4).hex()}.ntb'
+
+    def _auto_recover_next(self):
+        queue=getattr(self,'_recovery_queue',None)
+        if not queue:return
+        # A note being open must NOT block recovery: the copy is written in the
+        # background to a brand-new path and never touches the open document.
+        if self.worker or self.saver or self.workspace.busy():
+            QTimer.singleShot(250,self._auto_recover_next);return
+        folder,payload=queue.pop(0)
+        target=self._recovery_copy_name(payload)
+        try:
+            from editing.ne_save_session import read_recovery,remove_recovery
+            from zipfile import ZipFile
+            data=read_recovery(folder)
+            source=str(folder/'baseline.ntb')
+            with ZipFile(source) as archive:bundle=archive.read('noteBundle')
+        except Exception as exc:
+            diagnostic_exception('auto recovery snapshot',exc)
+            QTimer.singleShot(0,self._auto_recover_next);return
+        worker=SaveWorker(source,str(target),base_bundle=bundle,
+                          expected_bundle=bundle,parent=self,**data)
+        self.saver=worker
+        worker.failed.connect(lambda message:diagnostic_warning('auto recovery failed: '+message))
+        def finished():
+            success=worker.succeeded
+            if self.saver is worker:self.saver=None
+            if success:
+                try:remove_recovery(folder)
+                except (OSError,ValueError) as exc:
+                    diagnostic_exception('clean auto recovered session',exc)
+                self.statusBar().showMessage('已自动保存未保存的笔记：'+str(target),10000)
+            else:
+                diagnostic_warning('auto recovery failed, snapshot kept: '+str(folder))
+                self.statusBar().showMessage('未保存的笔记自动保存失败，快照已保留：'+str(folder),10000)
+            worker.deleteLater()
+            refresh_menu_state(self)
+            QTimer.singleShot(0,self._auto_recover_next)
+        worker.finished.connect(finished)
+        worker.start()
 
     def show_recovery_issues(self,issues):
         if not issues:return

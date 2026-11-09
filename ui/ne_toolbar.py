@@ -417,8 +417,14 @@ class EditorPanel(QFrame):
             action=QAction(name,self);action.setCheckable(True)
             action.triggered.connect(lambda checked=False,c=color:owner.select_color(c,switch_tool=False))
             color_group.addAction(action);self.shape_color_actions[color]=action
-            chip=QToolButton();chip.setDefaultAction(action);chip.setFixedSize(26,26)
-            chip.setToolTip(name);chip.setAccessibleName('图形颜色 '+name)
+            # Same purely graphical dot as the card toolbar: keep the action's
+            # Chinese colour name out of the swatch.
+            chip=QToolButton();chip.setFixedSize(26,26)
+            chip.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            chip.setCheckable(True);chip.setChecked(action.isChecked())
+            chip.clicked.connect(lambda checked=False,a=action:a.trigger())
+            action.toggled.connect(chip.setChecked)
+            chip.setAccessibleName('图形颜色 '+name)
             chip.setStyleSheet(f'QToolButton {{background:{color};border:2px solid #d1d5db;border-radius:13px;}}'
                                'QToolButton:checked {border:3px solid #1d4ed8;}'
                                'QToolButton:hover {border-color:#93c5fd;}')
