@@ -19,10 +19,12 @@ from editing.ne_edits import COLORS, HIGHLIGHT_COLORS
 from editing.ne_shapes import KINDS, LABELS
 from ui.ne_toolbar import tool_icon
 
-TOOL_KEYS = ('draw', 'shape', 'highlight', 'tape', 'erase', 'select', 'image', 'read')
+# "阅读" is deliberately absent: a card is always a writable sheet, and a
+# read-only tool here only caused users to think the pen had stopped working.
+TOOL_KEYS = ('draw', 'shape', 'highlight', 'tape', 'erase', 'select', 'image')
 TOOL_LABELS = {'draw': '画笔', 'shape': '图形', 'highlight': '荧光笔',
                'tape': '遮字胶带', 'erase': '橡皮擦', 'select': '选择',
-               'image': '图片', 'read': '阅读'}
+               'image': '图片'}
 
 
 def _colored_chip(row, action, color, name):
@@ -51,7 +53,7 @@ def _separator(row):
 
 
 class CardToolBar(QFrame):
-    """Two rows: eight shared tool actions + undo/redo, then per-tool settings."""
+    """Two rows: seven shared tool actions + undo/redo, then per-tool settings."""
 
     def __init__(self, owner, window, extras=None):
         super().__init__()
@@ -312,9 +314,6 @@ class CardToolBar(QFrame):
 
         row = self.pages['image'][1]
         row.addWidget(QLabel('图片请回主窗口插入；卡片保存题目截图与笔迹'))
-        row.addStretch(1)
-        row = self.pages['read'][1]
-        row.addWidget(QLabel('阅读模式：按住页面拖动可平移 · B 画笔  G 图形  H 荧光笔  E 橡皮擦  S 选择'))
         row.addStretch(1)
 
     def _choose_tape_color(self, color):

@@ -5,9 +5,9 @@
 > 原创代码采用 **0BSD** 许可；部分源自 GZhonghui/NotabilityViewer 的代码适用 MIT；第三方依赖各按自身许可。授权范围与义务详见 `LICENSE`、`LICENSE_SCOPE`、`THIRD_PARTY_NOTICES`、`DISCLAIMER`。
 > 本地构建环境为 Windows x64 + Python 3.11.9 + PyInstaller 6.22.3，产物不纳入版本管理。
 
-> **本地二次开发版本：0.10.0-Beta**（上游导入版本仍为 0.7.9-Beta）。版本号只写在 `core/ne_app_version.py` 的 `APP_VERSION`；窗口标题、关于对话框、日志、PDF 生成器属性和 EXE 文件名都从该处读取。新增功能递增次版本号（如 `0.11.0-Beta`），仅修 bug 递增修订号（如 `0.10.1-Beta`）。改完执行 `.build-venv\Scripts\python.exe build_local.py`，会自动生成 `windows_version_info.ver` 并产出 `dist\NotabilityEditor-<版本>-local.exe`。
+> **本地二次开发版本：0.11.0-Beta**（上游导入版本仍为 0.7.9-Beta）。版本号只写在 `core/ne_app_version.py` 的 `APP_VERSION`；窗口标题、关于对话框、日志、PDF 生成器属性和 EXE 文件名都从该处读取。新增功能递增次版本号（如 `0.11.0-Beta`），仅修 bug 递增修订号（如 `0.10.1-Beta`）。改完执行 `.build-venv\Scripts\python.exe build_local.py`，会自动生成 `windows_version_info.ver` 并产出 `dist\NotabilityEditor-<版本>-local.exe`。
 >
-> 本地新增：图形画笔、浮窗草稿纸、Ctrl+滚轮缩放、选区缩放笔迹；题目卡为**一整块连续可写的白纸**（题目截图贴上部的底图，下面直接作答），新建/重开自动全屏、卡片自带与主页同款的完整工具条、写完停笔 1.5 秒自动保存；做过卡片的题目在 PDF 页面上显示淡蓝细框（仅屏幕显示，导出不带），Ctrl+单击框内可重开卡片。工具栏固定顶部横排。
+> 本地新增：图形画笔、浮窗草稿纸、Ctrl+滚轮缩放、选区缩放笔迹；题目卡为**一整块连续可写的白纸**（题目截图贴上部的底图，下面直接作答），新建/重开自动全屏、卡片自带与主页同款的完整工具条、写完停笔 1.5 秒自动保存；做过卡片的题目在 PDF 页面上显示淡蓝细框（仅屏幕显示，导出不带），Ctrl+单击框内可重开卡片。工具栏固定顶部横排。0.11.0 起：题目卡笔迹改用与主画布相同的位图缓存（写再多笔也保持恒定帧耗）、卡片内移除「阅读」工具，工具栏新增「加长」按钮可向下追加最多 6 屏草稿纸，普通滚轮上下滚动、Ctrl+滚轮仍是缩放，纸张长度随卡片一起保存、重开恢复。
 
 NotabilityEditor 是面向 Notability 笔记的本地阅读与编辑工具，支持 NTB 笔记编辑、NOTE 笔记阅读，以及 PDF 导入和导出。软件免费提供。
 

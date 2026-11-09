@@ -100,6 +100,7 @@ def make_card(page, number, rect, rendered):
         'strokes': [],
         'geometry': [0, 0, 0, 0],
         'zoom_bias': 1.0,
+        'extra_height': 0.0,
     }
 
 
@@ -109,16 +110,34 @@ class CardCanvas(PdfNoteCanvas):
     Overriding ``paintVisible`` and ``setZoom`` here keeps every change out of
     the notebook canvas.  ``pointOnPage`` uses ``left=(width-w)/2`` and
     ``pageTop`` for hit testing, so the painted target must use exactly those.
+
+    The sheet can be extended downwards.  ``scroll_offset`` is a *display*
+    offset in widget pixels: it moves ``pageTop(0)`` (hence the painted target,
+    the question bitmap and every hit test) without ever changing a stroke
+    coordinate.  That is what lets the question scroll away with the paper
+    while existing ink stays exactly where it was written.
     """
 
     card_sheet = True
+    # A tall sheet is cached as one bitmap.  The notebook's 4 MP cap would
+    # downscale an extended sheet and blur the ink, so cards get a larger cap
+    # plus a matching byte budget.
+    MAX_RENDER_PIXELS = 16_000_000
+    MAX_EXTENSION_SCREENS = 6
 
-    def __init__(self, blob, width=1000.0, height=700.0):
+    def __init__(self, blob, width=1000.0, height=700.0, extra_height=0.0):
         self.question_image = QImage.fromData(blob, 'PNG')
-        super().__init__(None, _CARD_SVG, width, height)
+        self.base_page_width = float(width)
+        self.base_page_height = float(height)
+        self.extra_height = max(0.0, float(extra_height))
+        self.scroll_offset = 0.0
+        # Start with the full restored sheet so a reopened long card never
+        # briefly paints (or hit-tests) against a one-screen paper.
+        super().__init__(None, _CARD_SVG, width, height + self.extra_height)
         self.question_rect = QRectF()
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.setMinimumSize(1, 1)
+        self.content_cache.BUDGET = 256 * 1024 * 1024
 
     # ------------------------------------------------------------- geometry
     def setZoom(self, zoom):
@@ -129,20 +148,59 @@ class CardCanvas(PdfNoteCanvas):
         self.zoom = max(0.2, min(5.0, float(zoom)))
         self.draw_sizes = [(max(1, round(w * self.zoom)), max(1, round(h * self.zoom)))
                            for w, h in self.sizes]
-        self.tops = [0]
         self.clearCache()
         self._syncBrushCursor()
+        self.clamp_scroll()
         self.update()
+
+    def clamp_scroll(self):
+        """Publish the display offset through ``tops`` so hit tests follow it."""
+        total = self.draw_sizes[0][1]
+        limit = max(0.0, total - self.height())
+        self.scroll_offset = min(max(0.0, self.scroll_offset), limit)
+        self.tops = [-self.scroll_offset]
+
+    def scroll_by(self, delta):
+        """Scroll the sheet; returns True when the view actually moved."""
+        total = self.draw_sizes[0][1]
+        limit = max(0.0, total - self.height())
+        target = min(max(0.0, self.scroll_offset + float(delta)), limit)
+        if abs(target - self.scroll_offset) < 0.5:
+            return False
+        self.scroll_offset = target
+        self.tops = [-target]
+        self.update()
+        return True
 
     def set_page_size(self, width, height):
         """Grow/shrink the sheet with the window; stroke coordinates never move."""
-        w, h = max(120.0, float(width)), max(120.0, float(height))
-        if self.sizes and abs(self.sizes[0][0] - w) < 1 and abs(self.sizes[0][1] - h) < 1:
+        w, base = max(120.0, float(width)), max(120.0, float(height))
+        self.base_page_width, self.base_page_height = w, base
+        sheet = base + self.extra_height
+        if self.sizes and abs(self.sizes[0][0] - w) < 1 and abs(self.sizes[0][1] - sheet) < 1:
+            self.clamp_scroll()
             return
-        self.sizes = [(w, h)]
-        self.note_width, self.note_height = w, h
+        self.sizes = [(w, sheet)]
+        self.note_width, self.note_height = w, sheet
         self.page_layout = []
         self.setZoom(self.zoom)
+
+    def extend_sheet(self):
+        """Append one screen of blank paper below the current sheet."""
+        step = max(120.0, self.base_page_height)
+        if self.extra_height >= step * (self.MAX_EXTENSION_SCREENS - 1e-6):
+            return False
+        self.extra_height += step
+        self.sizes = [(self.base_page_width, self.base_page_height + self.extra_height)]
+        self.note_width, self.note_height = self.sizes[0]
+        self.page_layout = []
+        self.setZoom(self.zoom)
+        self.update()
+        return True
+
+    def can_extend(self):
+        step = max(120.0, self.base_page_height)
+        return self.extra_height < step * (self.MAX_EXTENSION_SCREENS - 1e-6)
 
     def question_display_height(self, page_width, page_height):
         """Question bitmap height in page coordinates, width-filling by default."""
@@ -150,7 +208,10 @@ class CardCanvas(PdfNoteCanvas):
         if image.isNull() or not image.width() or not image.height():
             return 0.0
         natural = page_width * image.height() / image.width()
-        cap = max(MIN_QUESTION_HEIGHT, page_height * MAX_QUESTION_RATIO)
+        # Cap against ONE screen, not the extended sheet: growing the paper
+        # must never stretch the printed question.
+        cap = max(MIN_QUESTION_HEIGHT,
+                  getattr(self, 'base_page_height', page_height) * MAX_QUESTION_RATIO)
         return min(max(natural, MIN_QUESTION_HEIGHT), cap)
 
     def question_target(self, target, nw, nh):
@@ -176,8 +237,24 @@ class CardCanvas(PdfNoteCanvas):
         return False
 
     # --------------------------------------------------------------- paint
+    def _paint_scroll_indicator(self, painter):
+        total = self.draw_sizes[0][1]
+        view = self.height()
+        if total <= view + 2 or view < 40:
+            return
+        track = view - 16
+        thumb = max(28.0, track * view / total)
+        ratio = self.scroll_offset / max(1.0, total - view)
+        top = 8 + (track - thumb) * ratio
+        painter.save()
+        try:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(37, 99, 235, 70))
+            painter.drawRoundedRect(QRectF(self.width() - 7, top, 4, thumb), 2, 2)
+        finally:
+            painter.restore()
+
     def paintVisible(self, painter, rect, dpr):
-        from rendering.ne_mixed_layers import paint_content
         painter.save()
         try:
             painter.setClipRect(rect)
@@ -191,7 +268,12 @@ class CardCanvas(PdfNoteCanvas):
             question = self.question_target(target, nw, nh)
             if question is not None:
                 painter.drawImage(question, self.question_image)
-            paint_content(self, painter, 0, target, include_ink=True)
+            # Same stable-bitmap cache as the notebook canvas.  Without it
+            # every pen sample repainted ALL committed strokes (100 strokes
+            # measured ~143 ms per frame); with it the frame cost is constant.
+            # The cache key does not contain scroll_offset, so scrolling never
+            # rebuilds the bitmap.
+            self.content_cache.paint(self, painter, 0, target, dpr)
             if self.show_ink:
                 self.paintSelectionOverlay(painter, 0, target)
             self.paintImageSelection(painter, 0, target)
@@ -199,6 +281,7 @@ class CardCanvas(PdfNoteCanvas):
             self.paintBrushCursor(painter)
             if hasattr(self, 'paintShapePreview'):
                 self.paintShapePreview(painter)
+            self._paint_scroll_indicator(painter)
         finally:
             painter.restore()
 
@@ -231,7 +314,8 @@ class QuestionCardWindow(QWidget):
 
         # The canvas is created before the toolbar: CardToolBar binds its
         # undo/redo actions and the settings pages to this very canvas.
-        self.canvas = CardCanvas(blob)
+        self.canvas = CardCanvas(
+            blob, extra_height=float(card.get('extra_height', 0.0)))
         self.canvas.setObjectName('cardCanvas')
         restore_canvas_strokes(self.canvas, decode_strokes(card.get('strokes', [])))
         layout.addWidget(self.canvas, 1)
@@ -249,6 +333,7 @@ class QuestionCardWindow(QWidget):
         sync_canvas_settings(owner, self.canvas)
         self._bind_owner_actions()
         self.sync_toolbar()
+        self._refresh_extend_button()
         QTimer.singleShot(0, self._refresh_layout)
         self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
 
@@ -261,17 +346,20 @@ class QuestionCardWindow(QWidget):
         shell.setSpacing(0)
         self.hint = QLabel('题目与演算在同一张纸')
         self.hint.setObjectName('cardHint')
+        self.extend_button = self._bar_button('加长', self.extend_sheet)
+        self.extend_button.setToolTip('草稿纸向下加长一屏；滚轮可上下滚动')
         self.full_button = self._bar_button('全屏', self.toggle_fullscreen)
         self.clear_button = self._bar_button('清空草稿', self.clear_draft)
         self.delete_button = self._bar_button('删除卡片', self.delete_card)
-        for button, name in ((self.full_button, 'cardFullscreen'),
+        for button, name in ((self.extend_button, 'cardExtend'),
+                             (self.full_button, 'cardFullscreen'),
                              (self.clear_button, 'cardClear'),
                              (self.delete_button, 'cardDelete')):
             button.setObjectName(name)
         self.toolbar = CardToolBar(
             self.owner, self,
-            extras=(self.hint, self.full_button, self.clear_button,
-                    self.delete_button))
+            extras=(self.hint, self.extend_button, self.full_button,
+                    self.clear_button, self.delete_button))
         shell.addWidget(self.toolbar)
         return bar
 
@@ -424,6 +512,7 @@ class QuestionCardWindow(QWidget):
         data['strokes'] = encode_strokes(self.canvas.edits.state(0)[0])
         data['geometry'] = [rect.x(), rect.y(), rect.width(), rect.height()]
         data['zoom_bias'] = float(self._zoom_bias)
+        data['extra_height'] = float(self.canvas.extra_height)
         return data
 
     def _mark_dirty(self):
@@ -453,6 +542,25 @@ class QuestionCardWindow(QWidget):
         flush = getattr(self.owner, 'flush_card_autosave', None)
         if flush is not None:
             flush()
+
+    def _refresh_extend_button(self):
+        button = getattr(self, 'extend_button', None)
+        if button is not None:
+            button.setEnabled(self.canvas.can_extend())
+
+    def extend_sheet(self):
+        """Add one screen of blank paper below, then scroll down to write on it.
+
+        Stroke coordinates are untouched: the extension only grows the page
+        height, and scrolling moves the view through ``tops``.
+        """
+        if self._deleted or not self.canvas.extend_sheet():
+            return
+        self.canvas.scroll_by(self.canvas.draw_sizes[0][1])
+        self._refresh_extend_button()
+        self._sync_to_owner()
+        self._mark_dirty()
+        self._schedule_autosave()
 
     def clear_draft(self):
         canvas = self.canvas
@@ -529,18 +637,29 @@ class QuestionCardWindow(QWidget):
         super().keyPressEvent(event)
 
     def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.Wheel and (
-                event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+        if event.type() == QEvent.Type.Wheel:
             delta = event.angleDelta().y()
-            if delta:
-                bias = self._zoom_bias * (1.15 if delta > 0 else 1 / 1.15)
-                self._zoom_bias = max(0.5, min(2.5, bias))
-                self._apply_zoom()
-                self._sync_to_owner()
-                self._mark_dirty()
-                self._schedule_autosave()
-            event.accept()
-            return True
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                if delta:
+                    bias = self._zoom_bias * (1.15 if delta > 0 else 1 / 1.15)
+                    self._zoom_bias = max(0.5, min(2.5, bias))
+                    self._apply_zoom()
+                    self._sync_to_owner()
+                    self._mark_dirty()
+                    self._schedule_autosave()
+                event.accept()
+                return True
+            # A long sheet has no QScrollArea: plain wheel scrolls the paper
+            # through CardCanvas.scroll_offset, which also moves hit testing.
+            # On a normal one-screen card the wheel is left alone.
+            if (watched is self.canvas
+                    and self.canvas.draw_sizes[0][1] > self.canvas.height() + 2):
+                scroll = delta or event.pixelDelta().y()
+                if scroll:
+                    self.canvas.scroll_by(-scroll)
+                event.accept()
+                return True
+            return False
         if (watched is self.canvas and event.type() == QEvent.Type.KeyPress
                 and undo_key(self.canvas, event)):
             event.accept()

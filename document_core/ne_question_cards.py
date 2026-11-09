@@ -26,7 +26,12 @@ MAX_ASSET = 12 * 1024 * 1024
 MAX_STROKES = 4000
 MAX_POINTS = 20000
 _FIELDS = frozenset(('id', 'number', 'page', 'asset', 'image_width', 'image_height',
-                     'rect', 'strokes', 'geometry', 'zoom_bias'))
+                     'rect', 'strokes', 'geometry', 'zoom_bias', 'extra_height'))
+# Cards written before the "extend the sheet" feature have no extra_height.
+# It is optional on read so older notebooks stay readable; every write includes
+# it with an explicit value.
+_LEGACY_FIELDS = _FIELDS - {'extra_height'}
+EXTRA_HEIGHT_LIMIT = 100000.0
 
 
 def _finite(value, low=-1e7, high=1e7):
@@ -101,8 +106,11 @@ def decode_strokes(items):
 
 
 def _validate_card(card):
-    if not isinstance(card, dict) or set(card) != _FIELDS:
+    if not isinstance(card, dict) or set(card) not in (_FIELDS, _LEGACY_FIELDS):
         raise ValueError('题目卡记录字段不符合规范')
+    # Legacy cards (no extra_height) behave exactly like a one-screen sheet.
+    if not _finite(card.get('extra_height', 0.0), 0, EXTRA_HEIGHT_LIMIT):
+        raise ValueError('题目卡草稿纸加长量不合法')
     if not isinstance(card['id'], str) or not 1 <= len(card['id']) <= 64:
         raise ValueError('题目卡编号不合法')
     if not isinstance(card['number'], int) or not 1 <= card['number'] <= 10000:
@@ -143,6 +151,11 @@ def _validate_payload(payload):
     referenced = set()
     seen = set()
     for card in payload['cards']:
+        # A notebook saved before the "extend the sheet" feature may still be
+        # open in memory.  Normalise before writing so every manifest entry
+        # carries an explicit height and reopened cards keep their paper size.
+        if isinstance(card, dict):
+            card.setdefault('extra_height', 0.0)
         _validate_card(card)
         if card['id'] in seen:
             raise ValueError('题目卡编号重复')
@@ -180,6 +193,9 @@ def read_cards(path):
         assets = {}
         for card in cards:
             _validate_card(card)
+            # Old notebooks stay readable and are upgraded in memory; the next
+            # save writes the field explicitly (see _validate_payload).
+            card.setdefault('extra_height', 0.0)
             digest = card['asset']
             if digest in assets:
                 continue
