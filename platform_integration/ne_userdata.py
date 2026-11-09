@@ -108,7 +108,14 @@ def migrate_user_data(*, base=None, settings_factory=None):
     """
     from PyQt6.QtCore import QLockFile
     parent = Path(base or os.environ.get('LOCALAPPDATA') or tempfile.gettempdir())
-    source, destination = parent / 'NotabilityViewer', parent / 'NotabilityEditor'
+    source = parent / 'NotabilityViewer'
+    # Explicit `base` is used by migration tests; real startups use the same
+    # portable data folder as the library and recovery snapshots.
+    if base:
+        destination = parent / 'NotabilityEditor'
+    else:
+        from core.ne_paths import data_directory
+        destination = data_directory()
     _plain_path(source)
     _plain_path(destination)
     destination.mkdir(parents=True, exist_ok=True)

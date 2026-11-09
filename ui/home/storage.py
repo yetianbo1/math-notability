@@ -176,8 +176,8 @@ def merge_library(base, local, remote):
 
 
 def library_index_path():
-    base = Path(os.environ.get('LOCALAPPDATA') or Path.home() / '.local' / 'share')
-    return base / 'NotabilityEditor' / 'home-library.json'
+    from core.ne_paths import data_directory
+    return data_directory() / 'home-library.json'
 
 
 def validate_library(data):

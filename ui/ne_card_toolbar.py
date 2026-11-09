@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (QFrame, QWidget, QHBoxLayout, QVBoxLayout,
 
 from editing.ne_edits import COLORS, HIGHLIGHT_COLORS
 from editing.ne_shapes import KINDS, LABELS
-from ui.ne_toolbar import tool_icon
+from ui.ne_toolbar import CustomColorButton, tool_icon
 
 # "阅读" is deliberately absent: a card is always a writable sheet, and a
 # read-only tool here only caused users to think the pen had stopped working.
@@ -31,7 +31,6 @@ def _colored_chip(row, action, color, name):
     chip = QToolButton()
     chip.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
     chip.setFixedSize(24, 24)
-    chip.setToolTip(name + ' ' + color)
     chip.setAccessibleName('颜色 ' + name)
     chip.setStyleSheet(
         f'QToolButton {{ background:{color}; border:2px solid #d1d5db; border-radius:12px; }}'
@@ -199,19 +198,17 @@ class CardToolBar(QFrame):
         row.addWidget(QLabel('颜色'))
         for name, color in palette.items():
             _colored_chip(row, actions.get(color) if actions else None, color, name)
+        # Same purely graphical "+" swatch as the main window: the action's
+        # long text ("自定义画笔颜色") must not be printed into the colour row.
+        button = CustomColorButton('#ffffff')
+        button.setFixedSize(26, 26)
+        button.setAccessibleName(custom_title)
         if custom_action is not None:
-            button = QToolButton()
             button.setDefaultAction(custom_action)
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            button.setFixedHeight(26)
-            button.setToolTip(custom_title)
-            row.addWidget(button)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         else:
-            button = QToolButton()
-            button.setText(custom_title)
-            button.setFixedHeight(26)
             button.setEnabled(False)
-            row.addWidget(button)
+        row.addWidget(button)
 
     # ----------------------------------------------------------------- pages
     def _build_pages(self):

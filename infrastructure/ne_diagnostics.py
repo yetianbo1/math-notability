@@ -74,8 +74,8 @@ def _qt_message(kind, context, text):
 
 
 def log_directory():
-    home = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-    return Path(home) / "NotabilityEditor" / "logs"
+    from core.ne_paths import data_directory
+    return data_directory() / "logs"
 
 
 def _write(text):

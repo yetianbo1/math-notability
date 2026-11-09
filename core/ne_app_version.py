@@ -6,7 +6,7 @@ generate the Windows VERSIONINFO resource, so nothing else needs editing.
 """
 import re
 
-APP_VERSION = '0.12.0-Beta'
+APP_VERSION = '0.13.0-Beta'
 APP_NAME = 'NotabilityEditor'
 
 # Numeric counterpart used by the Windows VERSIONINFO resource.  The last
@@ -18,7 +18,7 @@ VERSION_NUMBERS = tuple(int(part) for part in _MATCH.groups()) + (65535,)
 
 
 def exe_basename():
-    """e.g. NotabilityEditor-0.12.0-Beta-local (without .exe)."""
+    """e.g. NotabilityEditor-0.13.0-Beta-local (without .exe)."""
     return f'{APP_NAME}-{APP_VERSION}-local'
 
 

@@ -80,10 +80,15 @@ class LoadWorker(QThread):
                                                 and result.path.lower().endswith('.ntb'))
                 self.ready.emit(result)
                 if result.page_access_pending and not self.stop.is_set():
-                    # Let the first visible raster use CPU/GIL first. The
-                    # bounded fallback also supports opens in a hidden window.
-                    for _ in range(40):
-                        if self.stop.is_set() or self.page_access_gate.wait(.05):break
+                    # Give the first visible raster a short head start on the
+                    # GIL, then finish the optional capability check.  The old
+                    # 40 x 50 ms fallback kept `worker` alive for two extra
+                    # seconds AFTER the note was already on screen, which
+                    # locked every tool/menu through refresh_menu_state().
+                    # The gate still short-circuits the wait when the raster is
+                    # ready earlier; hidden/offscreen opens use the 0.18 s cap.
+                    for _ in range(6):
+                        if self.stop.is_set() or self.page_access_gate.wait(.03):break
                     if self.stop.is_set():return
                     from pages.ne_page_access import inspect_page_access,PageAccess
                     try:access=inspect_page_access(result.bundle_data,result.path,index.page_count)
@@ -578,6 +583,7 @@ class Viewer(QMainWindow):
             if existing is not None and not sip.isdeleted(existing):
                 existing.show();existing.raise_();existing.activateWindow()
                 if not existing.is_card_fullscreen():existing.enter_fullscreen()
+                if hasattr(existing, 'reset_to_pen'):existing.reset_to_pen()
                 return existing
         except RuntimeError:
             pass
@@ -1351,12 +1357,6 @@ class Viewer(QMainWindow):
                     '\n\n如需排查，可运行项目根目录的 DIAGNOSE_OVERWRITE.bat。',path)
         self.edit_changed()
         if not success:self.statusBar().showMessage('保存未完成，编辑内容仍保留',6000)
-        # A card window was closed while this save was in flight.  Only now do
-        # we know the bytes are on disk, so the "saved" confirmation is honest.
-        if getattr(self,'_card_saved_notice',False):
-            self._card_saved_notice=False
-            saved=bool(success)
-            QTimer.singleShot(0,lambda saved=saved:self._show_card_saved_notice(saved))
         queued=self._save_queued
         self._save_queued=False
         if success and queued and (self._has_unsaved_changes() or self._cards_dirty):
@@ -1373,13 +1373,6 @@ class Viewer(QMainWindow):
                 self.statusBar().showMessage('快照已保存；保存期间有新修改，已留在编辑页。请保存后再继续。')
             else:
                 QTimer.singleShot(0,after)
-
-    def _show_card_saved_notice(self, saved):
-        if saved:
-            QMessageBox.information(self,'题目卡','题目卡已保存')
-        else:
-            QMessageBox.warning(self,'题目卡',
-                                '题目卡保存未完成，笔迹仍保留在编辑中。请按 Ctrl+S 保存笔记。')
 
     def export_to_pdf(self):
         if self.worker or self.saver or not self.prepared:return
@@ -2138,10 +2131,15 @@ class Viewer(QMainWindow):
 
 
 def main():
+    from core.ne_paths import ensure_data_directory, publish_data_pointer
+    # Portable layout: bring the old per-user data over once, then make sure
+    # the registered EXE copy resolves to the same folder.
+    ensure_data_directory()
     try:
         migration = migrate_user_data()
     except Exception as exc:
         migration = {'status': 'pending', 'errors': ['旧版数据迁移未开始：' + str(exc)]}
+    publish_data_pointer()
     install_diagnostics()
     if migration.get('errors'):
         diagnostic_warning('Viewer data migration pending: ' + ' | '.join(migration['errors']))

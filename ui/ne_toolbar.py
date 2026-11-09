@@ -123,7 +123,7 @@ class FavoriteSwatches(QWidget):
         for color in self.shown_colors:
             button=Swatch(color,self);button.setCheckable(True)
             button.setAccessibleName('常用颜色 '+color)
-            button.setToolTip(color+' · 右键更改或删除')
+            # Colour chips stay purely visual: no colour names and no hover text.
             button.clicked.connect(lambda checked=False,c=color:self.select(c))
             button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             button.customContextMenuRequested.connect(lambda point,b=button,c=color:self.delete_menu(b,c,point))
@@ -168,7 +168,6 @@ class CustomColorButton(QToolButton):
         super().__init__(parent)
         self.color=color
         self.setFixedSize(34,34)
-        self.setToolTip('添加颜色：预设色板、自定义色板和屏幕吸色；右键色块可更改或删除')
         self.setAccessibleName('自定义颜色')
 
     def setColor(self,color):

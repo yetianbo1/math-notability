@@ -26,7 +26,8 @@ from formats.ne_loader import LoadCancelled
 
 
 def recovery_root():
-    return Path(os.environ.get('LOCALAPPDATA', str(Path.home() / '.local' / 'share'))) / 'NotabilityEditor' / 'recovery'
+    from core.ne_paths import data_directory
+    return data_directory() / 'recovery'
 
 
 def file_stamp(path):

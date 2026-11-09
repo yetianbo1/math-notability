@@ -232,8 +232,8 @@ class Library:
 
 
 def library_directory():
-    base = Path(os.environ.get('LOCALAPPDATA') or Path.home() / '.local' / 'share')
-    return base / 'NotabilityEditor' / 'library'
+    from core.ne_paths import data_directory
+    return data_directory() / 'library'
 
 
 def category_directory(name='未分类'):

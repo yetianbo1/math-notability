@@ -25,7 +25,8 @@ def install_directory():
 
 
 def data_directory():
-    return Path(os.environ.get('LOCALAPPDATA', tempfile.gettempdir())) / 'NotabilityEditor'
+    from core.ne_paths import data_directory as portable_data_directory
+    return portable_data_directory()
 
 
 def installed_matches_current(executable=None, installed=None):
@@ -132,6 +133,10 @@ def install_application(executable=None, *, registry=None, notify=True):
             Path(staging).unlink(missing_ok=True)
     marker.write_text(json.dumps({'app_id': APP_ID, 'version': VERSION},
                                 ensure_ascii=False), encoding='utf-8')
+    # Opening a .ntb from Explorer runs this registered copy; point it at the
+    # very same data folder the main EXE uses instead of creating a second one.
+    from core.ne_paths import POINTER_NAME
+    (root / POINTER_NAME).write_text(str(data_directory()), encoding='utf-8')
     script = Path(__file__).resolve().parent.parent / 'assets' / 'uninstall.ps1'
     # BOM is required for Chinese text in Windows PowerShell 5.1.
     (root / 'uninstall.ps1').write_text(script.read_text(encoding='utf-8-sig'),

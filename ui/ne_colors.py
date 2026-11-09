@@ -17,7 +17,6 @@ class ColorChip(QToolButton):
         self.color,self.current,self.remove,self.edit=color,current,remove,edit
         self.setFixedSize(38,38)
         self.setAccessibleName('颜色 '+color)
-        self.setToolTip(color+(' · 右键删除' if remove else ''))
 
     def paintEvent(self,event):
         painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.Antialiasing)

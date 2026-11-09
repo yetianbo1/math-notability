@@ -87,24 +87,6 @@ def restore_canvas_strokes(canvas, strokes):
     canvas.edits.cache.clear()
 
 
-def show_card_saved_notice(owner, saved=True):
-    """Confirmation after the user actively closes a card window.
-
-    A silent autosave runs on a background worker, so main.py defers this
-    notice until save_finished() reports that the bytes are on disk.
-    """
-    try:
-        parent = owner if isinstance(owner, QWidget) else None
-        if saved:
-            QMessageBox.information(parent, '题目卡', '题目卡已保存')
-        else:
-            QMessageBox.warning(
-                parent, '题目卡',
-                '题目卡笔迹已保留在编辑中，但笔记尚未写入磁盘。请按 Ctrl+S 保存笔记。')
-    except (RuntimeError, AttributeError):
-        pass
-
-
 def make_card(page, number, rect, rendered):
     blob, width_px, height_px = rendered
     return {
@@ -357,6 +339,7 @@ class QuestionCardWindow(QWidget):
         sync_canvas_settings(owner, self.canvas)
         self._bind_owner_actions()
         self.sync_toolbar()
+        self.reset_to_pen()
         self._refresh_extend_button()
         QTimer.singleShot(0, self._refresh_layout)
         self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -386,6 +369,19 @@ class QuestionCardWindow(QWidget):
                     self.clear_button, self.delete_button))
         shell.addWidget(self.toolbar)
         return bar
+
+    def reset_to_pen(self):
+        """Every card opens writable with the pen; the main window keeps its tool.
+
+        The card toolbar reuses the owner's shared QActions, so we deliberately
+        do not touch them: only the card's own canvas and its settings page are
+        switched.  Later tool clicks inside the card still work as usual.
+        """
+        if self.canvas.edit_tool != 'draw':
+            self.canvas.setEditTool('draw')
+        toolbar = getattr(self, 'toolbar', None)
+        if toolbar is not None:
+            toolbar.set_tool('draw')
 
     def sync_toolbar(self):
         toolbar = getattr(self, 'toolbar', None)
@@ -630,30 +626,16 @@ class QuestionCardWindow(QWidget):
             return
         self.close()
 
-    def _request_saved_notice(self):
-        """Confirm only once the background writer has really committed.
-
-        If a save is already running, defer the dialog to Viewer.save_finished;
-        otherwise report immediately.  A notebook that cannot be auto-saved
-        (an unsaved PDF/new-note draft, or a grouped-page plan) gets an honest
-        warning instead of a misleading "saved" confirmation.
-        """
-        owner = self.owner
-        if getattr(owner, 'saver', None) is not None:
-            owner._card_saved_notice = True
-            return
-        saved = not getattr(owner, '_cards_dirty', False)
-        show_card_saved_notice(owner, saved=saved)
-
     def closeEvent(self, event):
         try:
             self.canvas.finishGesture()
         except Exception:
             pass
         # Esc / the title-bar close are user actions: commit every stroke and
-        # confirm the write.  Programmatic closes (switching notes, quitting,
-        # deleting a card) set _deleted and stay silent so they never stack
-        # modal dialogs.
+        # leave immediately.  Saving is silent by design; the main window's
+        # status bar already reports a failed write and diagnostics logs it.
+        # Programmatic closes (switching notes, quitting, deleting a card) set
+        # _deleted and skip the extra sync.
         user_close = not self._deleted
         if user_close:
             # Sync first: while still marked full-screen, card_data() reports
@@ -663,7 +645,6 @@ class QuestionCardWindow(QWidget):
             # A pending debounce may never fire if the app is closing, so
             # commit the last strokes through the normal save pipeline now.
             self._flush_autosave()
-            self._request_saved_notice()
         if self._fullscreen:
             # Do NOT call restore_fullscreen() here: it calls show() on a
             # widget that is in the middle of closing.
