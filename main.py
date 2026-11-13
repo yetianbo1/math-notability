@@ -38,10 +38,7 @@ from import_export.ne_export import write_pdf, ExportCancelled
 from import_export.ne_noteexport import export_note
 from ui.ne_style import APP_STYLE,style_menu
 from ui.ne_ui import prepare_progress
-from ui.ne_save_notice import show_copyable_path_notice
-from ui.ne_unsaved_dialog import (
-    CHOICE_DISCARD, CHOICE_SAVE, show_unsaved_changes_dialog,
-)
+# 0.14.0: in-place saves are silent; no save-path or leave-confirmation dialogs.
 from images.ne_inserted_images import rewrite_archive
 from ui.ne_shortcuts import ShortcutManager
 from platform_integration.ne_userdata import migrate_user_data
@@ -303,6 +300,16 @@ class Viewer(QMainWindow):
         self._card_autosave_timer.setSingleShot(True)
         self._card_autosave_timer.setInterval(1500)
         self._card_autosave_timer.timeout.connect(self._card_autosave_timeout)
+        # 0.14.0: ordinary page ink is written back to the .ntb two seconds
+        # after the pen stops. Continuous writing keeps resetting this timer,
+        # so no disk write competes with screen sharing during a live stroke.
+        self._note_autosave_timer=QTimer(self)
+        self._note_autosave_timer.setSingleShot(True)
+        self._note_autosave_timer.setInterval(2000)
+        self._note_autosave_timer.timeout.connect(self._note_autosave_timeout)
+        self._leave_continuation=None
+        self._leave_save_failed=False
+        self._leave_save_attempts=0
         self._image_compat_notice_shown=False
         self._page_history_path = None
         self._page_history_ready = False
@@ -502,17 +509,61 @@ class Viewer(QMainWindow):
         if (self.saver or self.worker or self.pdf_importer or self.prepared is None
                 or not self.prepared.path.lower().endswith('.ntb')):
             return  # save_finished() will drain the queued state
-        if self._active_unsaved_draft() is not None:
-            return  # no formal file on disk yet; Ctrl+S must ask for a path
-        # Never let an automatic save raise a destructive "rebuild grouped
-        # pages" confirmation or a Save As dialog.
-        edits=getattr(getattr(self,'canvas',None),'edits',None)
+        if self._auto_save_blocked():return
+        self.save_ntb(silent=True)
+
+    def _auto_save_blocked(self):
+        """Grouped-page rebuilds are lossy; never run them unattended."""
+        canvas=getattr(self,'canvas',None)
+        edits=getattr(canvas,'edits',None)
         plan=edits.page_plan() if edits is not None and hasattr(edits,'page_plan') else None
-        if plan is not None and getattr(self.canvas,'page_edit_kind',None) in (
+        return plan is not None and getattr(canvas,'page_edit_kind',None) in (
                 'official_grouped_pdf','official_grouped_paper',
-                'materialized_grouped_pdf','ntb18_mixed_pdf'):
+                'materialized_grouped_pdf','ntb18_mixed_pdf')
+
+    def _status_note(self,message,duration=10000):
+        try:self.statusBar().showMessage(message,duration)
+        except (AttributeError,RuntimeError):pass
+
+    def _note_autosave_timeout(self):
+        self._note_autosave()
+
+    def _note_autosave(self):
+        """Quietly commit ordinary ink after the pen has been still for 2s."""
+        if (self.saver or self.worker or self.pdf_importer or self.prepared is None
+                or not self.prepared.path.lower().endswith('.ntb')):
+            return
+        if self._cards_dirty and self._card_autosave_timer.isActive():
+            return  # the 1.5s card timer writes the whole note first
+        if not self._has_unsaved_changes() and not self._cards_dirty:return
+        if self._auto_save_blocked():
+            self._status_note('页面重排不会自动覆盖保存，请用「另存为」保留备份')
             return
         self.save_ntb(silent=True)
+
+    def _silent_draft_target(self,draft):
+        """First save of a new note / PDF draft, without any file dialog."""
+        from ui.home.library import category_directory
+        import uuid
+        try:
+            folder=category_directory()/('note-'+uuid.uuid4().hex)
+            folder.mkdir(parents=True,exist_ok=False)
+        except OSError as exc:
+            diagnostic_exception('create silent draft folder',exc)
+            self._status_note('自动保存失败：无法创建笔记目录，编辑仍保留')
+            return None
+        name=Path(getattr(draft,'suggested_path',None) or '未命名.ntb').name
+        if not name.lower().endswith('.ntb'):name+='.ntb'
+        stem=Path(name).stem
+        target=folder/name
+        for index in range(1,1000):
+            if not target.exists():break
+            target=folder/f'{stem}-{index}.ntb'
+        return str(target)
+
+    def _auto_save_failed(self,message):
+        diagnostic_exception('save note',RuntimeError(message))
+        self._status_note('保存失败，编辑仍保留在本地快照：'+str(message)[:140],15000)
 
     def _load_question_cards(self):
         self._question_cards=[];self._question_card_assets={};self._cards_dirty=False
@@ -977,6 +1028,8 @@ class Viewer(QMainWindow):
         self._edit_revision+=1
         if editable and self.save_session and self._has_unsaved_changes() and not self._snapshot_timer.isActive():
             self._snapshot_timer.start()
+        if editable and self._has_unsaved_changes():
+            self._note_autosave_timer.start()
         # Keep the window title fixed to the app name and version.
         # File information remains available in the status bar and page panel.
 
@@ -1197,38 +1250,35 @@ class Viewer(QMainWindow):
         return True
 
     def confirm_leave(self,after,continue_label="继续"):
+        """0.14.0: never ask. Save quietly, then run the pending action.
+
+        A failed save must not trap the user in a close/re-entry loop; the
+        recovery snapshot keeps every edit in that case.
+        """
         if hasattr(self.canvas,'finishGesture'):self.canvas.finishGesture()
+        if getattr(self,'_leave_save_failed',False):
+            return True
         draft_kind=self._unsaved_draft_kind()
         is_draft=draft_kind is not None
         if is_draft and self._unsaved_draft_is_empty():
             return True
+        edits=getattr(self.canvas,'edits',None)
         image_dirty=bool((hasattr(self.canvas,'image_layers') and self.canvas.image_layers.dirty)
                          or (hasattr(self.canvas,'official_image_edits') and self.canvas.official_image_edits.dirty))
-        if not is_draft and not image_dirty and (not hasattr(self.canvas,'edits') or not self.canvas.edits.dirty):
+        if not is_draft and not image_dirty and (edits is None or not edits.dirty):
             return True
-        changes=[]
-        edits=getattr(self.canvas,'edits',None)
-        if edits is not None and edits.dirty:
-            changes.append('手写笔迹、选区或页面顺序')
-        native_images=getattr(self.canvas,'official_image_edits',None)
-        if native_images is not None:
-            if native_images.changes:changes.append('图片位置、大小或所属页面')
-            if native_images.lock_changes:changes.append('图片锁定状态')
-            if native_images.deletion_changes:changes.append('图片删除')
-            if native_images.layer_changes:changes.append('图片与其他内容的图层顺序')
-        viewer_images=getattr(self.canvas,'image_layers',None)
-        if viewer_images is not None and viewer_images.dirty:
-            changes.append('Viewer 插入的图片')
-        note_name=Path(self.prepared.path).name if self.prepared and self.prepared.path else '当前笔记'
-        choice=show_unsaved_changes_dialog(
-            self,
-            note_name=note_name,
-            changes=changes,
-            draft_kind=draft_kind,
-            continue_label=continue_label,
-        )
-        if choice==CHOICE_DISCARD:return True
-        if choice==CHOICE_SAVE:self.save_ntb(after=after)
+        self._note_autosave_timer.stop()
+        self._card_autosave_timer.stop()
+        if self._auto_save_blocked():
+            self._status_note('页面重排未自动覆盖保存，编辑仍保留；请用「另存为」')
+            return True
+        self._leave_continuation=after
+        self._leave_save_attempts=0
+        self.save_ntb(silent=True)
+        if self.saver is None and not self._save_queued:
+            # Nothing is writing in the background; never stall the action.
+            self._leave_continuation=None
+            return True
         return False
 
     def save_ntb(self,after=None,save_as=False,silent=False):
@@ -1239,13 +1289,14 @@ class Viewer(QMainWindow):
                 self.statusBar().showMessage('正在后台保存，最新修改将在本次完成后继续保存…')
             return
         if self.worker or self.pdf_importer or not self.prepared or not self.prepared.path.lower().endswith('.ntb'):return
+        if silent and save_as:return
+        if silent and self._auto_save_blocked():
+            self._status_note('页面重排不会自动覆盖保存，请用「另存为」保留备份')
+            return
         self.canvas.finishGesture()
         self._sync_open_cards()
         draft=self._active_unsaved_draft()
         first_save=draft is not None
-        if silent and (first_save or save_as):
-            # An automatic save must never open a file dialog.
-            return
         if (not save_as and not first_save and not self.canvas.edits.dirty
                 and not self.canvas.image_layers.dirty
                 and not self.canvas.official_image_edits.dirty
@@ -1256,61 +1307,60 @@ class Viewer(QMainWindow):
             return
         target=self.prepared.path
         if first_save or save_as:
-            library_folder = None
-            default=(str(draft.suggested_path) if first_save else
-                     str(Path(target).with_name(Path(target).stem+'-副本.ntb')))
-            if first_save and hasattr(self, 'workspace'):
-                from ui.home.library import category_directory
-                import uuid
-                folder = category_directory() / ('note-' + uuid.uuid4().hex)
-                try:
-                    folder.mkdir(parents=True, exist_ok=False)
-                except OSError as exc:
-                    QMessageBox.warning(self, '无法创建笔记存储目录', str(exc))
+            if silent:
+                # 0.14.0: drafts land in the portable library with no dialog.
+                target=self._silent_draft_target(draft)
+                if target is None:return
+            else:
+                library_folder = None
+                default=(str(draft.suggested_path) if first_save else
+                         str(Path(target).with_name(Path(target).stem+'-副本.ntb')))
+                if first_save and hasattr(self, 'workspace'):
+                    from ui.home.library import category_directory
+                    import uuid
+                    folder = category_directory() / ('note-' + uuid.uuid4().hex)
+                    try:
+                        folder.mkdir(parents=True, exist_ok=False)
+                    except OSError as exc:
+                        self._status_note('无法创建笔记存储目录：'+str(exc))
+                        return
+                    default = str(folder / Path(default).name)
+                    library_folder = folder
+                dialog_title=(
+                    '保存新建笔记为 NTB' if first_save and getattr(draft,'kind',None)=='new'
+                    else '首次保存 PDF 笔记为 NTB' if first_save
+                    else '另存为 NTB')
+                target,_=QFileDialog.getSaveFileName(self,dialog_title,default,'Notability Bundle (*.ntb)')
+                if library_folder and (not target or Path(target).parent.resolve() != library_folder.resolve()):
+                    try:
+                        library_folder.rmdir()
+                    except OSError:
+                        pass
+                if not target:return
+                if not target.lower().endswith('.ntb'):target+='.ntb'
+                if first_save and Path(target).resolve()==Path(self.prepared.path).resolve():
+                    QMessageBox.warning(self,'请选择正式保存位置','不能将临时缓存当作正式保存位置。请重新选择文件夹。')
                     return
-                default = str(folder / Path(default).name)
-                library_folder = folder
-            dialog_title=(
-                '保存新建笔记为 NTB' if first_save and getattr(draft,'kind',None)=='new'
-                else '首次保存 PDF 笔记为 NTB' if first_save
-                else '另存为 NTB')
-            target,_=QFileDialog.getSaveFileName(self,dialog_title,default,'Notability Bundle (*.ntb)')
-            if library_folder and (not target or Path(target).parent.resolve() != library_folder.resolve()):
-                try:
-                    library_folder.rmdir()
-                except OSError:
-                    pass
-            if not target:return
-            if not target.lower().endswith('.ntb'):target+='.ntb'
-            if first_save and Path(target).resolve()==Path(self.prepared.path).resolve():
-                QMessageBox.warning(self,'请选择正式保存位置','不能将临时缓存当作正式保存位置。请重新选择文件夹。')
-                return
-            if first_save and Path(target).exists():
-                decision=QMessageBox.warning(
-                    self,'确认覆盖已有 NTB',
-                    '所选 NTB 文件已经存在。继续保存将替换该文件，无法撤销。是否覆盖？',
-                    QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No)
-                if decision!=QMessageBox.StandardButton.Yes:return
-            # An ordinary Save As is *not* a page-rebuilding operation.
-            # Preserve official NTB event history, independent assets and PDF
-            # index as-is, regardless of original page count or page layout.
-            # Only an explicitly changed page_plan may enter a destructive path.
+                if first_save and Path(target).exists():
+                    decision=QMessageBox.warning(
+                        self,'确认覆盖已有 NTB',
+                        '所选 NTB 文件已经存在。继续保存将替换该文件，无法撤销。是否覆盖？',
+                        QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No)
+                    if decision!=QMessageBox.StandardButton.Yes:return
+                # An ordinary Save As is *not* a page-rebuilding operation.
+                # Preserve official NTB event history, independent assets and PDF
+                # index as-is, regardless of original page count or page layout.
+                # Only an explicitly changed page_plan may enter a destructive path.
         target=str(Path(target).resolve())
         plan=self.canvas.edits.page_plan() if hasattr(self.canvas.edits,'page_plan') else None
-        if not silent and plan is not None and getattr(self.canvas,'page_edit_kind',None) in (
+        if plan is not None and getattr(self.canvas,'page_edit_kind',None) in (
                 'official_grouped_pdf','official_grouped_paper',
                 'materialized_grouped_pdf','ntb18_mixed_pdf'):
-            choice=QMessageBox.question(self,'官方分组页面保存确认',
-                ('本次保存将重新排列原生纸张页面，保留原始笔迹数据、图片及资源。\n'
-                 '此写入方式仍需官方 Notability 实机验证。\n\n'
-                 if self.canvas.page_edit_kind=='official_grouped_paper' else
-                 '本次保存将按新页面顺序重建 PDF 底图，并重新编码可见原生笔迹。\n'
-                 '基本画笔笔迹可以保留，但原始笔压、部分曲线细节及未知笔迹属性可能变化。\n\n')
-                + '强烈建议先使用“另存为”保留备份，再到官方 Notability 检查。是否继续？',
-                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if choice!=QMessageBox.StandardButton.Yes:return
+            # 0.14.0: an explicit Ctrl+S is already the user's confirmation.
+            # Keep the compatibility warning, but never block with a modal box.
+            if not silent:
+                self._status_note('页面将按新顺序重建，建议先「另存为」保留备份',12000)
         try:
             snapshot=capture_save(self.canvas,self._edit_revision,self.canvas.thumbnailBytes())
             data=snapshot.data
@@ -1319,10 +1369,8 @@ class Viewer(QMainWindow):
                     and plan is not None and self.canvas.page_edit_kind!='native_per_page'):
                 raise ValueError('此分组笔记的图片修改与页面调整需分次保存。当前编辑仍保留。')
         except Exception as exc:
-            if silent:
-                diagnostic_exception('auto save question cards',exc)
-            else:
-                QMessageBox.warning(self,'无法准备导出',str(exc))
+            diagnostic_exception('prepare save',exc)
+            self._status_note('无法准备保存，编辑仍保留：'+str(exc)[:140])
             return
         self._save_silent=bool(silent)
         self.after_save=after
@@ -1349,11 +1397,7 @@ class Viewer(QMainWindow):
             self.saver.progress.connect(status_progress.setValue)
         self.saver.baseline_ready.connect(self.use_save_baseline)
         self.saver.ready.connect(self.saved_native)
-        if silent:
-            self.saver.failed.connect(lambda message:diagnostic_exception(
-                'auto save question cards',RuntimeError(message)))
-        else:
-            self.saver.failed.connect(lambda message:QMessageBox.warning(self,'保存失败，编辑内容仍保留',message))
+        self.saver.failed.connect(self._auto_save_failed)
         self.saver.finished.connect(self.save_finished)
         self.save_progress.canceled.connect(self.saver.stop.set)
         if self._save_status is not None:
@@ -1391,7 +1435,7 @@ class Viewer(QMainWindow):
         is_recovery=(Path(previous_path).resolve()!=Path(path).resolve()
                      and Path(path).stem.startswith(Path(previous_path).stem+'-保存恢复'))
         if getattr(self,'_save_silent',False):
-            self.statusBar().showMessage('题目卡已自动保存',2500)
+            self.statusBar().showMessage('已自动保存',2500)
         elif is_recovery or getattr(self,'_save_request_show_path',False):
             self.statusBar().showMessage('已保存并检查页面素材：'+path)
         else:
@@ -1419,11 +1463,8 @@ class Viewer(QMainWindow):
         if notice:
             path,is_recovery,detail,show_path=notice
             if is_recovery:
-                show_copyable_path_notice(self,'已安全保存到新文件',
-                    'Windows 拒绝覆盖当前原文件。\n\n原文件保持不变，所有本次修改已保存到：\n'+path+
-                    '\n\n当前编辑会话已切换到此文件，可继续编辑。\n\n覆盖失败诊断：\n'+
-                    (detail or '未记录到系统错误码')+
-                    '\n\n如需排查，可运行项目根目录的 DIAGNOSE_OVERWRITE.bat。',path)
+                diagnostic_warning('in-place save fell back to '+path+' | '+(detail or ''))
+                self._status_note('原文件被占用，已自动另存为：'+path,15000)
         self.edit_changed()
         if not success:self.statusBar().showMessage('保存未完成，编辑内容仍保留',6000)
         queued=self._save_queued
@@ -1442,6 +1483,28 @@ class Viewer(QMainWindow):
                 self.statusBar().showMessage('快照已保存；保存期间有新修改，已留在编辑页。请保存后再继续。')
             else:
                 QTimer.singleShot(0,after)
+        self._drain_leave_continuation(success)
+
+    def _drain_leave_continuation(self,success):
+        """Finish a silent leave-save, then run the deferred user action."""
+        continuation=getattr(self,'_leave_continuation',None)
+        if continuation is None:return
+        if not success:
+            self._leave_continuation=None
+            self._leave_save_failed=True
+            QTimer.singleShot(0,continuation)
+            return
+        if self._has_unsaved_changes() or self._cards_dirty:
+            self._leave_save_attempts+=1
+            if self._leave_save_attempts>3:
+                self._leave_continuation=None
+                self._status_note('仍有未写入的修改，已保留在本地恢复快照')
+                QTimer.singleShot(0,continuation)
+                return
+            QTimer.singleShot(0,lambda:self.save_ntb(silent=True))
+            return
+        self._leave_continuation=None
+        QTimer.singleShot(0,continuation)
 
     def export_to_pdf(self):
         if self.worker or self.saver or not self.prepared:return
@@ -2130,6 +2193,8 @@ class Viewer(QMainWindow):
             event.ignore()
 
     def closeEvent(self,event):
+        if getattr(self,'_note_autosave_timer',None) is not None:
+            self._note_autosave_timer.stop()
         # A debounced card save may still be pending. Commit it BEFORE the
         # unsaved-changes check, and let the existing "wait for saver" branch
         # below defer the actual close until the worker is done.

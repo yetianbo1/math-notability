@@ -6,7 +6,7 @@ generate the Windows VERSIONINFO resource, so nothing else needs editing.
 """
 import re
 
-APP_VERSION = '0.13.2-Beta'
+APP_VERSION = '0.14.0-Beta'
 APP_NAME = 'NotabilityEditor'
 
 # Numeric counterpart used by the Windows VERSIONINFO resource.  The last
