@@ -57,6 +57,28 @@ py -3.11 -m venv .venv
 
 默认安装位置为 `%LOCALAPPDATA%\Programs\NotabilityEditor`，构建产物位于项目的 `dist` 目录，部署日志位于 `deploy_logs` 目录。安装与注册使用统一版本比较，阻止旧版本覆盖较新程序；用户数据独立于程序目录保存。
 
+> **本二次开发版请注意**：`INSTALL.bat` / `deploy_windows.ps1` 是上游 0.7.9-Beta 遗留脚本，PyInstaller 的 `--name` 与版本标记写死为 `NotabilityEditor-0.7.9-Beta`，也不带本仓库新增模块所需的 `--hidden-import`。用它装出来的是上游旧版，**不是**当前的 `0.14.0-Beta`。安装本仓库版本请用下面「在另一台电脑上使用」的方法。
+
+### 在另一台电脑上使用
+
+**GitHub 仓库里只有源码**：`.gitignore` 排除了 `dist/` 与 `*.exe`，且仓库目前没有发布 Releases，所以从 GitHub 页面不能直接下载到可运行的 EXE。有三种方式：
+
+1. **直接拷贝 EXE（最省事，推荐）**：把本机 `dist\NotabilityEditor-0.14.0-Beta-local.exe` 用 U 盘／网盘复制到另一台电脑任意目录，双击即可运行。这是 onefile 便携程序，不需要安装 Python，不需要管理员权限，数据自动建在 EXE 同目录的 `NotabilityEditor-data\`。要连笔记一起搬，把整个 `NotabilityEditor-data\` 一起复制（含 `home-library.json`、`library`、`recovered`）。
+2. **从 GitHub 源码构建 EXE**：另一台电脑装 x64 Python 3.11，克隆或下载本仓库源码后，在项目根目录执行：
+
+   ```powershell
+   git clone https://github.com/yetianbo1/math-notability.git
+   cd math-notability
+   py -3.11 -m venv .build-venv
+   .\.build-venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller==6.22.3
+   .\.build-venv\Scripts\python.exe build_local.py
+   ```
+
+   产物是 `dist\NotabilityEditor-<APP_VERSION>-local.exe`，版本号取自 `core/ne_app_version.py`；`build_local.py` 会自动生成 `windows_version_info.ver`。**必须用 `build_local.py`，不要用 `INSTALL.bat`**。构建需联网下载依赖，首次约几分钟。
+3. **只以源码方式运行**（开发／调试）：按上一节「从源码启动」执行 `python main.py`。此时数据写在 `%LOCALAPPDATA%\NotabilityEditor`，与 EXE 的便携数据目录互不干扰。
+
+新电脑首次启动会各提示一次「注册 NotabilityEditor」与「免费软件告知」（确认记录存在本机的 QSettings，不随笔记迁移），同一大版本内之后不再提示。想让 `.ntb` 双击默认用本软件打开，在「设置 → 注册应用到 Windows…」注册一次即可。
+
 ### 启动本地触控工作台
 
 安装依赖后执行：
