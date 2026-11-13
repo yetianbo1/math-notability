@@ -49,7 +49,14 @@ class ContinuousInkMixin:
         self.edits.begin_compound()
         self._continuous_draw=QPointF(position)
         self._beginInkFragment(page,point)
-        self._drag_scroll_timer.start()
+        # A pen stroke is writing, not dragging an object.  Starting the
+        # drag-scroll timer here used to push the page by 20 px every 30 ms as
+        # soon as the nib entered the top/bottom 36 px of the viewport, so a
+        # long downward stroke made the paper run away under the pen.  While
+        # writing the view may only be moved by an explicit wheel event, the
+        # scroll bar or the page controls.  Object drags (image, selection,
+        # eraser) keep their edge scrolling through _startDragScrollTimer().
+        self._drag_scroll_timer.stop()
 
     def _extendContinuousDraw(self,position):
         start=self._continuous_draw;end=QPointF(position)

@@ -562,6 +562,15 @@ class EditingMixin(ContinuousInkMixin,SelectionMixin):
             if hasattr(window,'statusBar'):window.statusBar().showMessage(str(exc),5000)
 
     def _scrollWhileDragging(self):
+        # Second guard: even if a timer was armed elsewhere, a writing stroke
+        # must never auto-scroll the notebook out from under the nib.  Only an
+        # explicit wheel / scroll bar / page control may move the view while
+        # writing; object drags and the eraser keep their edge scrolling.
+        writing=(self._continuous_draw is not None
+                 and self.edit_tool!='erase'
+                 and not getattr(self,'_image_drag',None)
+                 and not (self.selection_drag and self.selection_drag['kind']=='move'))
+        if writing:self._drag_scroll_timer.stop();return
         active=getattr(self,'_image_drag',None) or self._continuous_draw is not None or (self.selection_drag and self.selection_drag['kind']=='move')
         if not active:self._drag_scroll_timer.stop();return
         scroll=self._scrollArea()
