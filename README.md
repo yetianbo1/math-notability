@@ -3,7 +3,7 @@
 > **本仓库说明（2026-11-08）**
 > 本仓库由 [SeedStudent/NotabilityEditor](https://github.com/SeedStudent/NotabilityEditor) 的 **0.7.9-Beta** 源码导入，作为个人二次开发的管理仓库。导入时未修改任何功能代码。
 > 原创代码采用 **0BSD** 许可；部分源自 GZhonghui/NotabilityViewer 的代码适用 MIT；第三方依赖各按自身许可。授权范围与义务详见 `LICENSE`、`LICENSE_SCOPE`、`THIRD_PARTY_NOTICES`、`DISCLAIMER`。
-> 本地构建环境为 Windows x64 + Python 3.11.9 + PyInstaller 6.22.3，产物不纳入版本管理。
+> 本地构建环境为 Windows x64 + Python 3.11.9 + PyInstaller 6.22.3；EXE 产物不进入 git 历史，通过 [GitHub Releases](https://github.com/yetianbo1/math-notability/releases) 分发。
 
 > **本地二次开发版本：0.14.0-Beta**（上游导入版本仍为 0.7.9-Beta）。版本号只写在 `core/ne_app_version.py` 的 `APP_VERSION`；窗口标题、关于对话框、日志、PDF 生成器属性和 EXE 文件名都从该处读取。新增功能递增次版本号（如 `0.13.0-Beta`），仅修 bug 递增修订号（如 `0.10.1-Beta`）。改完执行 `.build-venv\Scripts\python.exe build_local.py`，会自动生成 `windows_version_info.ver` 并产出 `dist\NotabilityEditor-<版本>-local.exe`。
 >
@@ -61,9 +61,11 @@ py -3.11 -m venv .venv
 
 ### 在另一台电脑上使用
 
-**GitHub 仓库里只有源码**：`.gitignore` 排除了 `dist/` 与 `*.exe`，且仓库目前没有发布 Releases，所以从 GitHub 页面不能直接下载到可运行的 EXE。有三种方式：
+**首选：从 GitHub Releases 下载 EXE**。本仓库的 git 内容只含源码（`.gitignore` 排除了 `dist/` 与 `*.exe`），可运行的 EXE 作为 Release 资产分发：打开 [Releases 页面](https://github.com/yetianbo1/math-notability/releases)，在最新版的 Assets 里下载 `NotabilityEditor-0.14.0-Beta-local.exe`，双击即可，附带的 `.sha256` 可核对完整性。发布新版本时把 `build_local.py` 产出的 EXE 上传为新 Release 的资产即可。
 
-1. **直接拷贝 EXE（最省事，推荐）**：把本机 `dist\NotabilityEditor-0.14.0-Beta-local.exe` 用 U 盘／网盘复制到另一台电脑任意目录，双击即可运行。这是 onefile 便携程序，不需要安装 Python，不需要管理员权限，数据自动建在 EXE 同目录的 `NotabilityEditor-data\`。要连笔记一起搬，把整个 `NotabilityEditor-data\` 一起复制（含 `home-library.json`、`library`、`recovered`）。
+其它方式：
+
+1. **拷贝本机 EXE（离线／U 盘）**：把本机 `dist\NotabilityEditor-0.14.0-Beta-local.exe` 复制到另一台电脑任意目录，双击即可运行。这是 onefile 便携程序，不需要安装 Python，不需要管理员权限，数据自动建在 EXE 同目录的 `NotabilityEditor-data\`。要连笔记一起搬，把整个 `NotabilityEditor-data\` 一起复制（含 `home-library.json`、`library`、`recovered`）。
 2. **从 GitHub 源码构建 EXE**：另一台电脑装 x64 Python 3.11，克隆或下载本仓库源码后，在项目根目录执行：
 
    ```powershell
